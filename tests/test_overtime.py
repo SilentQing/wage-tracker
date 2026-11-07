@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class OvertimeTests(unittest.TestCase):
+class LedgerTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.workspace = tempfile.TemporaryDirectory()
@@ -57,6 +57,8 @@ class OvertimeTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json()
 
+
+class OvertimeTests(LedgerTestCase):
     def test_backfill_idempotence_and_cancellation(self):
         for _ in range(2):
             self.assertEqual(self.mark("2024-02-29").status_code, 200)
@@ -134,6 +136,26 @@ class OvertimeTests(unittest.TestCase):
         self.module.init_db()
         self.assertEqual(self.data()["overtime_summary"]["count"], 3)
         self.assertEqual(self.data()["overtime_summary"]["dated_count"], 1)
+
+    def test_unused_legacy_part_is_removed_on_upgrade(self):
+        self.assertNotIn("庆祝", [part["name"] for part in self.data()["part_types"]])
+        with closing(sqlite3.connect(self.module.DB_PATH)) as conn:
+            conn.execute("INSERT INTO part_types VALUES ('庆祝', 0)")
+            conn.commit()
+        self.module.init_db()
+        self.assertNotIn("庆祝", [part["name"] for part in self.data()["part_types"]])
+
+    def test_legacy_part_with_records_keeps_history_and_price(self):
+        self.client.post("/api/records", json={
+            "record_date": "2024-02-29", "part_name": "庆祝", "quantity": 3,
+        })
+        self.client.post("/api/price", json={"part_name": "庆祝", "unit_price": 12.5})
+        self.module.init_db()
+        data = self.data()
+        self.assertEqual(data["records"][0]["part_name"], "庆祝")
+        self.assertEqual(data["records"][0]["quantity"], 3)
+        part = next(part for part in data["part_types"] if part["name"] == "庆祝")
+        self.assertEqual(part["unit_price"], 12.5)
 
 
 if __name__ == "__main__":

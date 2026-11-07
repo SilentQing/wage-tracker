@@ -4,10 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>计件交件与薪资核算</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="bg-slate-100 text-slate-800 min-h-screen pb-12">
     <div class="max-w-4xl mx-auto p-4 space-y-5">
+        <p id="saveStatus" role="status" aria-live="polite" class="sticky top-2 z-10 bg-blue-50 text-blue-900 rounded-lg px-3 py-2 text-sm break-words">正在读取账本…</p>
+        <p id="legacyWarning" hidden class="bg-amber-50 text-amber-900 rounded-lg px-3 py-2 text-sm"></p>
         <div class="flex flex-wrap items-center justify-between bg-white p-4 rounded-xl shadow-sm gap-3">
             <div>
                 <h1 class="text-xl font-bold text-slate-900">⚙️ 交件数量与薪资核算账本</h1>
@@ -15,17 +17,33 @@
             </div>
             <div class="flex items-center gap-2">
                 <label class="text-sm font-medium text-slate-600">核算周期:</label>
-                <select id="monthSelect" onchange="loadData()" class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm bg-slate-50 font-medium">
+                <select id="monthSelect" onchange="changeMonth()" class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm bg-slate-50 font-medium">
                 </select>
             </div>
         </div>
+
+        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3">
+            <div class="flex flex-wrap gap-2 items-center justify-between">
+                <span id="monthLockStatus" class="text-sm font-medium"></span>
+                <button id="monthLockButton" onclick="toggleMonthLock()" class="bg-slate-200 px-3 py-2 rounded-lg text-sm">结算锁定本月</button>
+            </div>
+            <div class="flex flex-wrap gap-2 text-sm">
+                <button onclick="downloadExport('records')" class="border rounded-lg px-3 py-2">导出交件 CSV</button>
+                <button onclick="downloadExport('overtime')" class="border rounded-lg px-3 py-2">导出加班 CSV</button>
+                <a href="/api/backup" download class="border rounded-lg px-3 py-2">下载完整备份</a>
+                <label class="border rounded-lg px-3 py-2 cursor-pointer">恢复完整备份
+                    <input id="backupFile" type="file" accept=".json,application/json" onchange="restoreBackup(this)" data-write class="hidden">
+                </label>
+            </div>
+            <p id="authStatus" class="text-xs text-slate-500"></p>
+        </section>
 
         <div id="unpricedAlert" class="hidden bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl shadow-sm">
             <div class="flex items-start">
                 <div class="flex-shrink-0 text-amber-500 font-bold text-lg">⚠️</div>
                 <div class="ml-3 w-full">
                     <h3 class="text-sm font-bold text-amber-800">检测到有已交件种类尚未设置单价！</h3>
-                    <p class="text-xs text-amber-700 mt-1">请在下方【种类与单价配置】中补全以下种类的单价，否则其计件金额暂按 0 元计算：</p>
+                    <p class="text-xs text-amber-700 mt-1">请在下方配置默认单价，或编辑交件补齐记录单价。待定价金额暂按 0 元计算，补齐前无法结算锁定。</p>
                     <div id="unpricedList" class="mt-2 flex flex-wrap gap-2"></div>
                 </div>
             </div>
@@ -63,9 +81,12 @@
                         <input type="date" id="recDate" class="w-full border rounded-lg px-3 py-2 text-sm">
                     </div>
                     <div>
-                        <label class="block text-xs text-slate-500 mb-1">零件种类 (可选或手输新种类)</label>
-                        <input type="text" id="recPart" list="partOptions" placeholder="如：定距筒" class="w-full border rounded-lg px-3 py-2 text-sm">
-                        <datalist id="partOptions"></datalist>
+                        <label for="partOptions" class="block text-xs text-slate-500 mb-1">选择已有零件种类</label>
+                        <select id="partOptions" onchange="document.getElementById('recPart').value = this.value" class="w-full border rounded-lg px-3 py-2 text-sm bg-white">
+                            <option value="">请选择已有种类</option>
+                        </select>
+                        <label for="recPart" class="block text-xs text-slate-500 mt-2 mb-1">零件名称（也可手输新种类）</label>
+                        <input type="text" id="recPart" oninput="syncPartSelection()" placeholder="如：定距筒" class="w-full border rounded-lg px-3 py-2 text-sm">
                     </div>
                 </div>
                 <div class="grid grid-cols-2 gap-3">
@@ -78,22 +99,27 @@
                         <input type="text" id="recNote" placeholder="批次/机台号" class="w-full border rounded-lg px-3 py-2 text-sm">
                     </div>
                 </div>
-                <button onclick="submitRecord()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 rounded-lg text-sm transition">
+                <div>
+                    <label for="recPrice" class="block text-xs text-slate-500 mb-1">本条交件单价（元，可留空使用默认价；编辑时留空保留原价）</label>
+                    <input type="number" id="recPrice" min="0" max="100000000" step="0.000001" placeholder="按记录保存，后续调价保留原价" class="w-full border rounded-lg px-3 py-2 text-sm">
+                </div>
+                <button id="recordSubmit" data-write onclick="submitRecord()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 rounded-lg text-sm transition">
                     + 确认添加交件记录
                 </button>
+                <button id="cancelRecordEdit" hidden onclick="cancelRecordEdit()" class="text-sm text-blue-600">取消编辑</button>
             </div>
 
             <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col justify-between">
                 <div>
                     <div class="flex justify-between items-center border-b pb-2">
                         <h2 class="font-bold text-slate-800">🏷️ 种类单价与分类汇总</h2>
-                        <span class="text-xs text-slate-400">修改单价自动保存</span>
+                        <span class="text-xs text-slate-400">默认价用于新交件和待定价记录</span>
                     </div>
                     <div id="priceList" class="divide-y divide-slate-100 mt-2 max-h-52 overflow-y-auto pr-1"></div>
                 </div>
                 <div class="mt-3 pt-2 border-t flex items-center gap-2">
                     <input type="text" id="newPartName" placeholder="新增其它种类名称..." class="flex-1 border rounded-lg px-2.5 py-1.5 text-xs">
-                    <button onclick="addNewPartType()" class="bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium">新增种类</button>
+                    <button data-write onclick="addNewPartType()" class="bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium">新增种类</button>
                 </div>
             </div>
         </div>
@@ -144,6 +170,7 @@
                     <label for="calendarMonth" class="text-xs text-slate-500">查看月份</label>
                     <input id="calendarMonth" type="month" onchange="selectCalendarMonth(this.value)" class="border rounded-lg px-2 py-1.5 text-sm">
                     <button id="todayOvertime" disabled onclick="markTodayOvertime()" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-2 rounded-lg text-sm">✓ 今日加班</button>
+                    <button data-write onclick="openOvertimeEditor()" class="border px-3 py-2 rounded-lg text-sm">调整某天时长/补贴</button>
                 </div>
             </div>
             <p class="text-xs text-slate-500">点击日期勾选加班，再点可取消。支持补记今天以前的日期，每天最多一次，未来日期不可勾选。日期按浏览器本地时间显示。</p>
@@ -161,6 +188,8 @@
 
         <div class="bg-white p-4 rounded-xl shadow-sm">
             <h2 class="font-bold text-slate-800 border-b pb-2 mb-3">📋 交件记录明细</h2>
+            <label for="recordSearch" class="text-xs text-slate-500">筛选当前周期的日期、种类或备注（顶部核算仍显示完整周期）</label>
+            <input id="recordSearch" type="search" oninput="renderRecordTable()" placeholder="输入日期、零件名称或备注" class="w-full border rounded-lg px-3 py-2 text-sm my-2">
             <div class="overflow-x-auto">
                 <table class="w-full text-left border-collapse text-sm">
                     <thead>
@@ -178,7 +207,27 @@
                 </table>
             </div>
         </div>
+        <details class="bg-white p-4 rounded-xl shadow-sm">
+            <summary class="font-bold cursor-pointer">已删除交件（当前周期）</summary>
+            <div id="deletedRecords" class="mt-3"></div>
+        </details>
+        <details class="bg-white p-4 rounded-xl shadow-sm">
+            <summary class="font-bold cursor-pointer">最近20次修改记录</summary>
+            <ul id="auditLog" class="mt-3 text-xs text-slate-500"></ul>
+        </details>
     </div>
+
+    <dialog id="overtimeDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">
+        <form onsubmit="saveCustomOvertime(event)" class="space-y-3">
+            <h2 class="font-bold">调整某天加班</h2>
+            <label class="block text-sm">日期<input id="customOtDate" type="date" required onchange="fillOvertimeEditor()" class="block w-full border rounded-lg px-3 py-2"></label>
+            <label class="block text-sm">加班时长（小时）<input id="customOtHours" type="number" min="0" max="24" step="0.1" required class="block w-full border rounded-lg px-3 py-2"></label>
+            <label class="block text-sm">当天补贴（元）<input id="customOtSubsidy" type="number" min="0" max="100000000" step="0.01" required class="block w-full border rounded-lg px-3 py-2"></label>
+            <label class="block text-sm"><input id="customOtDefaults" type="checkbox"> 恢复按所属月份默认设置计算</label>
+            <p class="text-xs text-slate-500">保存会记录该日期加班。历史次数补日期请使用月历转换选项。</p>
+            <div class="flex gap-3"><button data-write class="bg-blue-600 text-white px-4 py-2 rounded-lg">保存当天加班</button><button type="button" onclick="document.getElementById('overtimeDialog').close()" class="border px-4 py-2 rounded-lg">取消</button></div>
+        </form>
+    </dialog>
 
     <script src="/static/app.js"></script>
 </body>

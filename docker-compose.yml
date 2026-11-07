@@ -1,20 +1,14 @@
-version: '3.8'
-
 services:
   wage-tracker:
-    image: python:3.11-slim
+    build: .
     container_name: wage-tracker
     restart: unless-stopped
     working_dir: /app
     volumes:
-      - ./app.py:/app/app.py
-      - ./templates:/app/templates:ro
-      - ./static:/app/static:ro
       - ./data:/app/data
     ports:
       - "8095:8000"
     environment:
       - TZ=Asia/Shanghai
-    command: >
-      sh -c "pip install --no-cache-dir fastapi uvicorn pydantic -i https://pypi.tuna.tsinghua.edu.cn/simple &&
-             uvicorn app:app --host 0.0.0.0 --port 8000"
+      - WAGE_USERNAME=${WAGE_USERNAME:-admin}
+      - WAGE_PASSWORD=${WAGE_PASSWORD:-}
