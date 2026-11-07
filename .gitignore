@@ -1,0 +1,23 @@
+data/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Local environments and credentials
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+backups/
+*.bak
+*.log
