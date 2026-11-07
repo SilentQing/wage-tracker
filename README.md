@@ -1,6 +1,6 @@
 # ⚙️ 计件交件与工时薪资核算系统 (Wage Tracker)
 
-专为车间计件交件设计的轻量级 Web 记账与薪资核算工具，支持**飞牛 NAS (fnOS)** Docker 一键部署。采用 **FastAPI + SQLite + TailwindCSS** 单文件架构，数据本地持久化落盘，手机与电脑局域网打开浏览器即可随时录入。
+专为车间计件交件设计的轻量级 Web 记账与薪资核算工具，支持**飞牛 NAS (fnOS)** Docker 一键部署。采用 **FastAPI + SQLite + TailwindCSS**，后端、页面与交互脚本分文件维护，由 FastAPI 统一提供服务，数据本地持久化落盘，手机与电脑局域网打开浏览器即可随时录入。
 
 ## ✨ 核心功能
 
@@ -15,12 +15,42 @@
   - **实际时薪**：当前总收入 ÷ (上班天数 × 每日正班工时 + 加班总工时)
 - **按月独立账本**：零件单价全局共享，交件明细与考勤参数按月份独立核算，同时支持“全部累计”汇总视图。
 
+## 项目结构
+
+```text
+wage-tracker/
+├── app.py                 # FastAPI 接口与 SQLite 数据库操作
+├── templates/
+│   └── index.html         # 页面结构
+├── static/
+│   └── app.js             # 页面交互、接口请求与薪资展示计算
+├── docker-compose.yml     # NAS Docker 部署配置
+└── data/
+    └── wage.db            # 运行时生成的本地数据库
+```
+
+浏览器通过 `/api/` 接口读写数据，通过 `/static/app.js` 加载交互脚本。首页和静态文件均由 FastAPI 提供，修改页面或脚本后刷新浏览器即可加载。
+
+## 本地运行
+
+在项目根目录创建独立虚拟环境并启动服务。以下命令适用于 Windows PowerShell。
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install fastapi uvicorn pydantic
+.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
+```
+
+打开浏览器访问 `http://127.0.0.1:8000`。数据库路径为相对启动目录的 `data/wage.db`，日常启动时应保持项目根目录为工作目录。
+
 ## 🚀 飞牛 NAS (fnOS) 部署步骤
 
-1. 在飞牛 NAS 文件管理中新建文件夹（如 `/vol1/1000/docker/wage-tracker`），放入 `app.py` 和 `docker-compose.yml`。
+1. 在飞牛 NAS 文件管理中新建文件夹（如 `/vol1/1000/docker/wage-tracker`），放入 `app.py`、`docker-compose.yml`，以及完整的 `templates/` 和 `static/` 目录。
 2. 打开飞牛 **Docker** → **Compose** → **新增项目**，选择该文件夹路径并启动。
 3. 浏览器访问 `http://你的飞牛NAS局域网IP:8095` 即可使用。
 4. 所有数据自动持久化保存在 `./data/wage.db` 中。
+
+升级已有部署时，需要一起更新 `app.py`、`templates/`、`static/` 和 `docker-compose.yml`，随后重新创建 Compose 容器，使新增目录挂载生效。`data/` 保存实际账本，更新前先备份该目录。
 
 ## GitHub 维护与 VPS 更新
 
@@ -34,8 +64,8 @@ VPS 后续更新按以下流程执行。
 
 1. 本仓库为公开仓库，可通过 `git clone https://github.com/SilentQing/wage-tracker.git` 检出到独立的源码目录，无需配置 GitHub 登录凭据。
 2. 在源码目录执行 `git pull --ff-only`，确认要部署的提交。
-3. 停止应用服务，将现有应用、数据库和服务配置备份到带时间戳的独立目录。
-4. 将选定提交的应用代码部署到 `/opt/wage-tracker`，保留原有 `data/` 和虚拟环境。若依赖有变化，按该提交的部署说明更新依赖。
+3. 停止应用服务，将现有应用（包括页面与静态文件）、数据库和服务配置备份到带时间戳的独立目录。
+4. 将选定提交的 `app.py`、`templates/` 和 `static/` 一起部署到 `/opt/wage-tracker`，保留原有 `data/` 和虚拟环境。若依赖有变化，按该提交的部署说明更新依赖。
 5. 启动服务，检查服务状态、网页响应、原有记录与工资计算。验证失败时使用对应备份恢复。
 
 GitHub 仓库导入与 VPS 生产更新分别执行。服务器的更新命令和回滚步骤将在首次从 GitHub 部署时实机验证。

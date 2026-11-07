@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>计件交件与薪资核算</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-100 text-slate-800 min-h-screen pb-12">
+    <div class="max-w-4xl mx-auto p-4 space-y-5">
+        <div class="flex flex-wrap items-center justify-between bg-white p-4 rounded-xl shadow-sm gap-3">
+            <div>
+                <h1 class="text-xl font-bold text-slate-900">⚙️ 交件数量与薪资核算账本</h1>
+                <p class="text-xs text-slate-500">飞牛NAS本地持久化存储 · 实时计算日薪与时薪</p>
+            </div>
+            <div class="flex items-center gap-2">
+                <label class="text-sm font-medium text-slate-600">核算周期:</label>
+                <select id="monthSelect" onchange="loadData()" class="border border-slate-300 rounded-lg px-3 py-1.5 text-sm bg-slate-50 font-medium">
+                </select>
+            </div>
+        </div>
+
+        <div id="unpricedAlert" class="hidden bg-amber-50 border-l-4 border-amber-500 p-4 rounded-r-xl shadow-sm">
+            <div class="flex items-start">
+                <div class="flex-shrink-0 text-amber-500 font-bold text-lg">⚠️</div>
+                <div class="ml-3 w-full">
+                    <h3 class="text-sm font-bold text-amber-800">检测到有已交件种类尚未设置单价！</h3>
+                    <p class="text-xs text-amber-700 mt-1">请在下方【种类与单价配置】中补全以下种类的单价，否则其计件金额暂按 0 元计算：</p>
+                    <div id="unpricedList" class="mt-2 flex flex-wrap gap-2"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div class="bg-emerald-600 text-white p-4 rounded-xl shadow-sm">
+                <div class="text-xs opacity-85">当前总收入 (含补贴)</div>
+                <div id="statTotalPay" class="text-2xl font-bold mt-1">¥0.00</div>
+                <div id="statPaySub" class="text-xs opacity-80 mt-1">计件 ¥0 + 补贴 ¥0</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                <div class="text-xs text-slate-500">平均日薪</div>
+                <div id="statDailyWage" class="text-2xl font-bold text-slate-900 mt-1">¥0.00</div>
+                <div id="statDaysSub" class="text-xs text-slate-400 mt-1">按 0 天计算</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                <div class="text-xs text-slate-500">实际时薪</div>
+                <div id="statHourlyWage" class="text-2xl font-bold text-blue-600 mt-1">¥0.00</div>
+                <div id="statHoursSub" class="text-xs text-slate-400 mt-1">总工时 0 小时</div>
+            </div>
+            <div class="bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                <div class="text-xs text-slate-500">累计交件总数</div>
+                <div id="statTotalQty" class="text-2xl font-bold text-slate-900 mt-1">0 <span class="text-sm font-normal">件</span></div>
+                <div id="statTypesSub" class="text-xs text-slate-400 mt-1">共 0 个种类</div>
+            </div>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-4">
+            <div class="bg-white p-4 rounded-xl shadow-sm space-y-3">
+                <h2 class="font-bold text-slate-800 border-b pb-2">📝 录入上交数量</h2>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-slate-500 mb-1">日期</label>
+                        <input type="date" id="recDate" class="w-full border rounded-lg px-3 py-2 text-sm">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-500 mb-1">零件种类 (可选或手输新种类)</label>
+                        <input type="text" id="recPart" list="partOptions" placeholder="如：定距筒" class="w-full border rounded-lg px-3 py-2 text-sm">
+                        <datalist id="partOptions"></datalist>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs text-slate-500 mb-1">上交数量 (件)</label>
+                        <input type="number" id="recQty" placeholder="输入数量" min="1" class="w-full border rounded-lg px-3 py-2 text-sm font-bold">
+                    </div>
+                    <div>
+                        <label class="block text-xs text-slate-500 mb-1">备注 (选填)</label>
+                        <input type="text" id="recNote" placeholder="批次/机台号" class="w-full border rounded-lg px-3 py-2 text-sm">
+                    </div>
+                </div>
+                <button onclick="submitRecord()" class="w-full bg-slate-900 hover:bg-slate-800 text-white font-medium py-2.5 rounded-lg text-sm transition">
+                    + 确认添加交件记录
+                </button>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl shadow-sm flex flex-col justify-between">
+                <div>
+                    <div class="flex justify-between items-center border-b pb-2">
+                        <h2 class="font-bold text-slate-800">🏷️ 种类单价与分类汇总</h2>
+                        <span class="text-xs text-slate-400">修改单价自动保存</span>
+                    </div>
+                    <div id="priceList" class="divide-y divide-slate-100 mt-2 max-h-52 overflow-y-auto pr-1"></div>
+                </div>
+                <div class="mt-3 pt-2 border-t flex items-center gap-2">
+                    <input type="text" id="newPartName" placeholder="新增其它种类名称..." class="flex-1 border rounded-lg px-2.5 py-1.5 text-xs">
+                    <button onclick="addNewPartType()" class="bg-slate-200 hover:bg-slate-300 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-medium">新增种类</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+            <div class="flex flex-wrap justify-between items-center border-b pb-2 mb-3 gap-2">
+                <div>
+                    <h2 class="font-bold text-slate-800">⏱️ 上班天数与加班核算 (固定 2.5h/次)</h2>
+                    <p id="otSummaryText" class="text-xs text-blue-600 font-medium mt-0.5">当前加班：0 次 = 0.0 小时 | 累计补贴 ¥0</p>
+                </div>
+                <button onclick="syncWorkDaysFromRecords()" class="text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2.5 py-1.5 rounded-md font-medium">
+                    按有交件的日期数填入上班天数 (<span id="distinctDaysCount">0</span>天)
+                </button>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-3">
+                <div>
+                    <label class="block text-xs text-slate-500 mb-1">上班天数 (天)</label>
+                    <input type="number" step="0.5" id="attDays" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm font-semibold">
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-500 mb-1">正班日工时 (小时/天)</label>
+                    <input type="number" step="0.5" id="attDailyHours" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm">
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-500 mb-1">加班天数/次数 (次)</label>
+                    <div class="flex items-center">
+                        <button onclick="adjustOtCount(-1)" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold px-2.5 py-2 rounded-l-lg text-sm">-</button>
+                        <input type="number" step="1" min="0" id="attOtCount" onchange="saveAttendance()" class="w-full border-y px-2 py-2 text-center text-sm font-bold text-amber-600">
+                        <button onclick="adjustOtCount(1)" class="bg-amber-500 hover:bg-amber-600 text-white font-bold px-2.5 py-2 rounded-r-lg text-sm">+</button>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-500 mb-1">单次加班时长 (小时)</label>
+                    <input type="number" step="0.5" id="attHoursPerOt" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm bg-slate-50">
+                </div>
+                <div>
+                    <label class="block text-xs text-slate-500 mb-1">单次加班补贴 (元)</label>
+                    <input type="number" step="1" id="attSubsidy" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm bg-slate-50">
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl shadow-sm">
+            <h2 class="font-bold text-slate-800 border-b pb-2 mb-3">📋 交件记录明细</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-left border-collapse text-sm">
+                    <thead>
+                        <tr class="border-b text-xs text-slate-400">
+                            <th class="py-2 px-2">日期</th>
+                            <th class="py-2 px-2">种类</th>
+                            <th class="py-2 px-2 text-right">上交数量</th>
+                            <th class="py-2 px-2 text-right">单价</th>
+                            <th class="py-2 px-2 text-right">小计金额</th>
+                            <th class="py-2 px-2">备注</th>
+                            <th class="py-2 px-2 text-center">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="recordTableBody" class="divide-y divide-slate-100"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
