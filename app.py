@@ -1,12 +1,13 @@
 import os
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
+import calendar
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 os.makedirs("data", exist_ok=True)
 DB_PATH = "data/wage.db"
@@ -59,6 +60,11 @@ def init_db():
 
     c.execute("INSERT OR IGNORE INTO part_types (name, unit_price) VALUES ('定距筒', 0.0)")
     c.execute("INSERT OR IGNORE INTO part_types (name, unit_price) VALUES ('庆祝', 0.0)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS overtime_days (
+            work_date TEXT PRIMARY KEY
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -87,13 +93,69 @@ class AttendanceUpdate(BaseModel):
     month: str
     work_days: float
     daily_regular_hours: float
-    overtime_count: int
-    hours_per_ot: float = 2.5
-    subsidy_per_ot: float = 10.0
+    overtime_count: int = Field(ge=0)
+    hours_per_ot: float = Field(default=2.5, ge=0, allow_inf_nan=False)
+    subsidy_per_ot: float = Field(default=10.0, ge=0, allow_inf_nan=False)
+
+
+class OvertimeUpdate(BaseModel):
+    work_date: date
+    checked: bool
+    replace_undated: bool = False
+
+
+def month_start(month: str):
+    try:
+        start = date.fromisoformat(f"{month}-01")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="月份格式应为 YYYY-MM")
+    if start.strftime("%Y-%m") != month:
+        raise HTTPException(status_code=400, detail="月份格式应为 YYYY-MM")
+    return start
+
+
+def overtime_data(conn, month):
+    # 月历包含相邻月份日期，以便周一至周日的整周统计跨月保持一致。
+    params = ()
+    where = ""
+    if month != "ALL":
+        start = month_start(month)
+        end = start.replace(day=calendar.monthrange(start.year, start.month)[1])
+        first = start - timedelta(days=start.weekday())
+        last = end + timedelta(days=6 - end.weekday())
+        where = "WHERE o.work_date BETWEEN ? AND ?"
+        params = (first.isoformat(), last.isoformat())
+    days = [dict(row) for row in conn.execute(f"""
+        SELECT o.work_date,
+               COALESCE(a.hours_per_ot, 2.5) AS hours,
+               COALESCE(a.subsidy_per_ot, 10.0) AS subsidy
+        FROM overtime_days o
+        LEFT JOIN attendance a ON a.month = substr(o.work_date, 1, 7)
+        {where}
+        ORDER BY o.work_date
+    """, params)]
+    monthly_days = [day for day in days if month == "ALL" or day["work_date"].startswith(month)]
+    attendance_where = "WHERE month != 'ALL'" if month == "ALL" else "WHERE month = ?"
+    attendance_params = () if month == "ALL" else (month,)
+    legacy = conn.execute(f"""
+        SELECT COALESCE(SUM(overtime_count), 0) AS count,
+               COALESCE(SUM(overtime_count * COALESCE(hours_per_ot, 2.5)), 0) AS hours,
+               COALESCE(SUM(overtime_count * COALESCE(subsidy_per_ot, 10.0)), 0) AS subsidy
+        FROM attendance {attendance_where}
+    """, attendance_params).fetchone()
+    return days, {
+        "dated_count": len(monthly_days),
+        "undated_count": legacy["count"],
+        "count": len(monthly_days) + legacy["count"],
+        "hours": sum(day["hours"] for day in monthly_days) + legacy["hours"],
+        "subsidy": sum(day["subsidy"] for day in monthly_days) + legacy["subsidy"],
+    }
 
 
 @app.get("/api/data")
 def get_all_data(month: str = "ALL"):
+    if month != "ALL":
+        month_start(month)
     conn = get_db()
     c = conn.cursor()
 
@@ -134,18 +196,26 @@ def get_all_data(month: str = "ALL"):
             "subsidy_per_ot": 10.0,
         }
 
-    c.execute("SELECT DISTINCT substr(record_date, 1, 7) as m FROM records ORDER BY m DESC")
+    c.execute("""
+        SELECT substr(record_date, 1, 7) AS m FROM records
+        UNION SELECT substr(work_date, 1, 7) FROM overtime_days
+        UNION SELECT month FROM attendance WHERE month != 'ALL'
+        ORDER BY m DESC
+    """)
     months = [r["m"] for r in c.fetchall() if r["m"]]
     current_m = date.today().strftime("%Y-%m")
     if current_m not in months:
         months.insert(0, current_m)
 
+    overtime_days, overtime_summary = overtime_data(conn, month)
     conn.close()
     return {
         "records": records,
         "part_types": part_types,
         "attendance": attendance,
         "months": months,
+        "overtime_days": overtime_days,
+        "overtime_summary": overtime_summary,
     }
 
 
@@ -216,6 +286,7 @@ def rename_part(item: PartRename):
 
 @app.post("/api/attendance")
 def save_attendance(item: AttendanceUpdate):
+    month_start(item.month)
     conn = get_db()
     c = conn.cursor()
     c.execute(
@@ -240,6 +311,34 @@ def save_attendance(item: AttendanceUpdate):
     )
     conn.commit()
     conn.close()
+    return {"status": "ok"}
+
+
+@app.put("/api/overtime")
+def save_overtime(item: OvertimeUpdate):
+    if item.work_date > date.today():
+        raise HTTPException(status_code=400, detail="只能记录今天或过去日期的加班")
+    work_date = item.work_date.isoformat()
+    month = work_date[:7]
+    conn = get_db()
+    try:
+        with conn:
+            if item.checked:
+                inserted = conn.execute(
+                    "INSERT OR IGNORE INTO overtime_days (work_date) VALUES (?)", (work_date,)
+                ).rowcount
+                # 插入和扣减在同一事务内，重复请求不会多扣历史次数。
+                if inserted and item.replace_undated:
+                    updated = conn.execute("""
+                        UPDATE attendance SET overtime_count = overtime_count - 1
+                        WHERE month = ? AND overtime_count > 0
+                    """, (month,)).rowcount
+                    if not updated:
+                        raise HTTPException(status_code=409, detail="本月已没有可转为日期记录的历史次数，请刷新后重试")
+            else:
+                conn.execute("DELETE FROM overtime_days WHERE work_date = ?", (work_date,))
+    finally:
+        conn.close()
     return {"status": "ok"}
 
 

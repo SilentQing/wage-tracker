@@ -1,14 +1,28 @@
 let currentState = { records: [], part_types: [], attendance: {}, months: [] };
 let distinctDays = 0;
+let overtimeSaving = false;
+let loadVersion = 0;
 
-document.getElementById('recDate').valueAsDate = new Date();
+function localDateKey(value = new Date()) {
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
 
-async function loadData() {
+document.getElementById('recDate').value = localDateKey();
+
+async function loadData(requestedMonth) {
+    const version = ++loadVersion;
     const monthSelect = document.getElementById('monthSelect');
-    const selectedMonth = monthSelect.value || new Date().toISOString().slice(0, 7);
+    const selectedMonth = requestedMonth || monthSelect.value || localDateKey().slice(0, 7);
 
     const res = await fetch(`/api/data?month=${selectedMonth}`);
-    currentState = await res.json();
+    if (!res.ok) throw new Error('读取账本失败，请刷新重试');
+    const data = await res.json();
+    if (version !== loadVersion) return;
+    currentState = data;
+    if (selectedMonth !== 'ALL' && !currentState.months.includes(selectedMonth)) {
+        currentState.months.push(selectedMonth);
+        currentState.months.sort().reverse();
+    }
 
     monthSelect.innerHTML = `<option value="ALL" ${selectedMonth === 'ALL' ? 'selected' : ''}>全部累计</option>`;
     currentState.months.forEach(m => {
@@ -17,6 +31,7 @@ async function loadData() {
     });
 
     renderAll();
+    renderOvertimeCalendar();
 }
 
 function renderAll() {
@@ -83,19 +98,20 @@ function renderAll() {
     }).join('');
 
     const att = currentState.attendance;
-    const otCount = att.overtime_count || 0;
+    const summary = currentState.overtime_summary;
+    const otCount = summary.count;
     const hoursPerOt = (att.hours_per_ot !== undefined && att.hours_per_ot !== null) ? att.hours_per_ot : 2.5;
     const subsidyPerOt = (att.subsidy_per_ot !== undefined && att.subsidy_per_ot !== null) ? att.subsidy_per_ot : 10;
 
     document.getElementById('attDays').value = att.work_days;
     document.getElementById('attDailyHours').value = att.daily_regular_hours;
-    document.getElementById('attOtCount').value = otCount;
+    document.getElementById('attOtCount').value = att.overtime_count || 0;
     document.getElementById('attHoursPerOt').value = hoursPerOt;
     document.getElementById('attSubsidy').value = subsidyPerOt;
 
     // 自动计算加班总时长与加班补贴
-    const totalOtHours = otCount * hoursPerOt;
-    const otSubsidy = otCount * subsidyPerOt;
+    const totalOtHours = summary.hours;
+    const otSubsidy = summary.subsidy;
     const totalPay = pieceWage + otSubsidy;
     const dailyWage = att.work_days > 0 ? (totalPay / att.work_days) : 0;
     const regularHours = att.work_days * att.daily_regular_hours;
@@ -103,7 +119,7 @@ function renderAll() {
     const hourlyWage = totalHours > 0 ? (totalPay / totalHours) : 0;
 
     document.getElementById('otSummaryText').innerText =
-        `当前加班：${otCount} 次 × ${hoursPerOt}h = ${totalOtHours.toFixed(1)} 小时 | 加班补贴：${otCount} 次 × ¥${subsidyPerOt} = ¥${otSubsidy.toFixed(0)}`;
+        `当前加班：${otCount} 次（已记日期 ${summary.dated_count} 次，历史 ${summary.undated_count} 次）共 ${totalOtHours.toFixed(1)} 小时 | 加班补贴 ¥${otSubsidy.toFixed(2)}`;
 
     document.getElementById('statTotalPay').innerText = `¥${totalPay.toFixed(2)}`;
     document.getElementById('statPaySub').innerText = `计件 ¥${pieceWage.toFixed(1)} + 补贴 ¥${otSubsidy.toFixed(0)}`;
@@ -136,6 +152,127 @@ function renderAll() {
             `;
         }).join('');
     }
+}
+
+function renderOvertimeCalendar() {
+    const month = document.getElementById('monthSelect').value;
+    const allMonths = month === 'ALL';
+    const summary = currentState.overtime_summary;
+    document.getElementById('calendarMonth').value = allMonths ? '' : month;
+    document.getElementById('calendarMonth').disabled = overtimeSaving;
+    document.getElementById('monthSelect').disabled = overtimeSaving;
+    document.getElementById('todayOvertime').disabled = overtimeSaving;
+    document.querySelectorAll('[onchange="saveAttendance()"], [onclick^="adjustOtCount"], [onclick="syncWorkDaysFromRecords()"]')
+        .forEach(element => { element.disabled = allMonths || overtimeSaving; });
+    document.getElementById('replaceUndatedLabel').classList.toggle('hidden', allMonths || summary.undated_count === 0);
+    if (allMonths || summary.undated_count === 0) document.getElementById('replaceUndated').checked = false;
+    document.getElementById('replaceUndated').disabled = overtimeSaving;
+    document.getElementById('calendarSummary').textContent =
+        `${allMonths ? '全部累计' : month}：已记日期 ${summary.dated_count} 次，未分配日期 ${summary.undated_count} 次，共 ${summary.hours.toFixed(1)} 小时，补贴 ¥${summary.subsidy.toFixed(2)}`;
+    const grid = document.getElementById('overtimeCalendar');
+    const weeks = document.getElementById('overtimeWeeks');
+    grid.innerHTML = '';
+    weeks.innerHTML = '';
+    if (allMonths) {
+        grid.textContent = '请选择月份查看加班日期和每周汇总。';
+        return;
+    }
+
+    const days = new Map(currentState.overtime_days.map(day => [day.work_date, day]));
+    const [year, monthNumber] = month.split('-').map(Number);
+    const first = new Date(year, monthNumber - 1, 1, 12);
+    first.setDate(first.getDate() - (first.getDay() + 6) % 7);
+    const last = new Date(year, monthNumber, 0, 12);
+    last.setDate(last.getDate() + (7 - last.getDay()) % 7);
+    const today = localDateKey();
+    ['一', '二', '三', '四', '五', '六', '日'].forEach(name => {
+        const heading = document.createElement('div');
+        heading.className = 'text-center text-xs text-slate-500 py-2';
+        heading.textContent = `周${name}`;
+        grid.appendChild(heading);
+    });
+    let weekCount = 0;
+    let weekHours = 0;
+    let weekSubsidy = 0;
+    let weekStart = localDateKey(first);
+    for (const cursor = new Date(first); cursor <= last; cursor.setDate(cursor.getDate() + 1)) {
+        const key = localDateKey(cursor);
+        const entry = days.get(key);
+        const inMonth = key.startsWith(month);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.disabled = !inMonth || key > today || overtimeSaving;
+        button.setAttribute('aria-pressed', String(Boolean(entry)));
+        button.setAttribute('aria-label', `${key}${entry ? ' 已加班，点击取消' : ' 未记录加班，点击勾选'}`);
+        button.dataset.date = key;
+        button.className = `min-h-16 border rounded-lg py-2 text-center text-xs disabled:cursor-default ${entry ? 'bg-amber-100 border-amber-400 text-amber-900' : 'bg-slate-50 border-slate-200'} ${inMonth ? '' : 'opacity-40'} ${key === today ? 'ring-2 ring-blue-400' : ''}`;
+        button.textContent = `${cursor.getDate()}${key === today ? ' 今天' : ''}`;
+        const status = document.createElement('span');
+        status.className = 'block mt-1 text-xs';
+        status.textContent = entry ? `✓ ${entry.hours}h` : '—';
+        button.appendChild(status);
+        button.addEventListener('click', () => setOvertime(key, !entry));
+        grid.appendChild(button);
+        if (entry) {
+            weekCount += 1;
+            weekHours += entry.hours;
+            weekSubsidy += entry.subsidy;
+        }
+        if (cursor.getDay() === 0) {
+            const row = document.createElement('div');
+            row.className = 'rounded-lg bg-slate-50 px-3 py-2 text-sm';
+            row.textContent = `${weekStart} 至 ${key}　加班 ${weekCount} 次 · ${weekHours.toFixed(1)} 小时 · 补贴 ¥${weekSubsidy.toFixed(2)}`;
+            weeks.appendChild(row);
+            weekCount = 0;
+            weekHours = 0;
+            weekSubsidy = 0;
+            const next = new Date(cursor);
+            next.setDate(next.getDate() + 1);
+            weekStart = localDateKey(next);
+        }
+    }
+}
+
+async function selectCalendarMonth(month) {
+    if (!month || overtimeSaving) return;
+    document.getElementById('replaceUndated').checked = false;
+    try {
+        await loadData(month);
+        document.getElementById('calendarStatus').textContent = '';
+    } catch (error) {
+        document.getElementById('calendarStatus').textContent = error.message;
+    }
+}
+
+async function setOvertime(workDate, checked, replaceUndated = document.getElementById('replaceUndated').checked) {
+    if (overtimeSaving) return;
+    overtimeSaving = true;
+    renderOvertimeCalendar();
+    const status = document.getElementById('calendarStatus');
+    status.textContent = '正在保存…';
+    try {
+        const response = await fetch('/api/overtime', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ work_date: workDate, checked, replace_undated: checked && replaceUndated })
+        });
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(typeof error.detail === 'string' ? error.detail : '保存失败，请刷新后重试');
+        }
+        await loadData(workDate.slice(0, 7));
+        status.textContent = `${workDate} ${checked ? '已记录加班' : '已取消加班'}`;
+    } catch (error) {
+        status.textContent = `${error.message}。如保存结果不确定，请刷新核对，重复勾选不会重复计数。`;
+    } finally {
+        overtimeSaving = false;
+        renderOvertimeCalendar();
+    }
+}
+
+function markTodayOvertime() {
+    // 今日快捷按钮始终新增今日记录，历史日期转换通过日历操作。
+    setOvertime(localDateKey(), true, false);
 }
 
 async function submitRecord() {
@@ -203,20 +340,31 @@ function adjustOtCount(delta) {
 
 async function saveAttendance() {
     const month = document.getElementById('monthSelect').value;
+    if (month === 'ALL' || overtimeSaving) return;
     const payload = {
         month,
         work_days: parseFloat(document.getElementById('attDays').value) || 0,
         daily_regular_hours: parseFloat(document.getElementById('attDailyHours').value) || 8,
         overtime_count: parseInt(document.getElementById('attOtCount').value, 10) || 0,
-        hours_per_ot: parseFloat(document.getElementById('attHoursPerOt').value) || 2.5,
-        subsidy_per_ot: parseFloat(document.getElementById('attSubsidy').value) || 10
+        hours_per_ot: Number(document.getElementById('attHoursPerOt').value),
+        subsidy_per_ot: Number(document.getElementById('attSubsidy').value)
     };
-    await fetch('/api/attendance', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    });
-    loadData();
+    overtimeSaving = true;
+    renderOvertimeCalendar();
+    try {
+        const response = await fetch('/api/attendance', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) throw new Error('考勤参数保存失败，请检查次数、时长与补贴均为非负数');
+        await loadData();
+    } catch (error) {
+        document.getElementById('calendarStatus').textContent = error.message;
+    } finally {
+        overtimeSaving = false;
+        renderOvertimeCalendar();
+    }
 }
 
 function syncWorkDaysFromRecords() {
@@ -224,4 +372,6 @@ function syncWorkDaysFromRecords() {
     saveAttendance();
 }
 
-loadData();
+loadData().catch(error => {
+    document.getElementById('calendarStatus').textContent = error.message;
+});

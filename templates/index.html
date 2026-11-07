@@ -101,7 +101,7 @@
         <div class="bg-white p-4 rounded-xl shadow-sm">
             <div class="flex flex-wrap justify-between items-center border-b pb-2 mb-3 gap-2">
                 <div>
-                    <h2 class="font-bold text-slate-800">⏱️ 上班天数与加班核算 (固定 2.5h/次)</h2>
+                    <h2 class="font-bold text-slate-800">⏱️ 上班天数与加班核算</h2>
                     <p id="otSummaryText" class="text-xs text-blue-600 font-medium mt-0.5">当前加班：0 次 = 0.0 小时 | 累计补贴 ¥0</p>
                 </div>
                 <button onclick="syncWorkDaysFromRecords()" class="text-xs bg-blue-50 text-blue-600 hover:bg-blue-100 px-2.5 py-1.5 rounded-md font-medium">
@@ -118,7 +118,7 @@
                     <input type="number" step="0.5" id="attDailyHours" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm">
                 </div>
                 <div>
-                    <label class="block text-xs text-slate-500 mb-1">加班天数/次数 (次)</label>
+                    <label class="block text-xs text-slate-500 mb-1">未分配日期的历史加班 (次)</label>
                     <div class="flex items-center">
                         <button onclick="adjustOtCount(-1)" class="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold px-2.5 py-2 rounded-l-lg text-sm">-</button>
                         <input type="number" step="1" min="0" id="attOtCount" onchange="saveAttendance()" class="w-full border-y px-2 py-2 text-center text-sm font-bold text-amber-600">
@@ -134,7 +134,30 @@
                     <input type="number" step="1" id="attSubsidy" onchange="saveAttendance()" class="w-full border rounded-lg px-3 py-2 text-sm bg-slate-50">
                 </div>
             </div>
+            <p class="text-xs text-slate-500 mt-3">日历加班会自动计入核算。上方历史次数用于保留旧记录，补记这些日期时可在日历中勾选“转为日期记录”。</p>
         </div>
+
+        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3" aria-labelledby="overtimeHeading">
+            <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-2">
+                <h2 id="overtimeHeading" class="font-bold text-slate-800">📅 加班日历</h2>
+                <div class="flex flex-wrap items-center gap-2">
+                    <label for="calendarMonth" class="text-xs text-slate-500">查看月份</label>
+                    <input id="calendarMonth" type="month" onchange="selectCalendarMonth(this.value)" class="border rounded-lg px-2 py-1.5 text-sm">
+                    <button id="todayOvertime" disabled onclick="markTodayOvertime()" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-2 rounded-lg text-sm">✓ 今日加班</button>
+                </div>
+            </div>
+            <p class="text-xs text-slate-500">点击日期勾选加班，再点可取消。支持补记今天以前的日期，每天最多一次，未来日期不可勾选。日期按浏览器本地时间显示。</p>
+            <label id="replaceUndatedLabel" class="flex items-center gap-2 text-sm text-amber-800 bg-amber-50 p-2 rounded-lg">
+                <input type="checkbox" id="replaceUndated">
+                补记历史加班时，将本月 1 次未分配日期的历史加班转为日期记录
+            </label>
+            <p id="calendarSummary" class="text-sm font-medium text-blue-600" aria-live="polite"></p>
+            <p id="calendarStatus" class="text-sm text-red-600" role="status"></p>
+            <div id="overtimeCalendar" class="grid grid-cols-7 gap-1"></div>
+            <h3 class="text-sm font-bold pt-2">每周加班汇总（周一至周日）</h3>
+            <p class="text-xs text-slate-500">跨月的一周显示完整周数据，月度工资只计算本月。未分配日期的历史加班仅计入月度汇总。</p>
+            <div id="overtimeWeeks" class="space-y-2"></div>
+        </section>
 
         <div class="bg-white p-4 rounded-xl shadow-sm">
             <h2 class="font-bold text-slate-800 border-b pb-2 mb-3">📋 交件记录明细</h2>
