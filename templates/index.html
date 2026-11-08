@@ -163,6 +163,30 @@
             <p class="text-xs text-slate-500 mt-3">日历加班会自动计入核算。上方历史次数用于保留旧记录，补记这些日期时可在日历中勾选“转为日期记录”。</p>
         </div>
 
+        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3">
+            <h2 class="font-bold">每日出勤与请假</h2>
+            <p class="text-sm">每天正班 8.5 小时，周末正常出勤。截至今天默认上班，只需记录请假；未来日期不计入。</p>
+            <p id="dailyAttendanceSummary" class="text-sm" aria-live="polite"></p>
+            <button id="enableDailyAttendance" onclick="enableDailyAttendance()" class="border rounded-lg px-3 py-2">本月启用每日出勤</button>
+            <div id="dailyAttendanceCalendar" class="grid grid-cols-7 gap-1"></div>
+            <p class="text-xs text-slate-500">点击日期修改请假。出勤天数按实际正班工时 ÷ 8.5 折算；全天请假 8.5 小时，半天 4.25 小时。</p>
+        </section>
+        <dialog id="leaveDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">
+            <form onsubmit="saveLeaveDay(event)" class="space-y-3">
+                <h2 class="font-bold">记录请假</h2>
+                <input id="leaveDate" type="date" readonly class="border rounded-lg px-3 py-2">
+                <label class="block">请假小时<input id="leaveHours" type="number" min="0" max="8.5" step="0.01" required class="border rounded-lg px-3 py-2"></label>
+                <div class="flex gap-3">
+                    <button type="button" onclick="document.getElementById('leaveHours').value=8.5">全天</button>
+                    <button type="button" onclick="document.getElementById('leaveHours').value=4.25">半天</button>
+                    <button type="button" onclick="document.getElementById('leaveHours').value=0">恢复出勤</button>
+                </div>
+                <label class="block">备注<input id="leaveNote" maxlength="2000" class="border rounded-lg px-3 py-2"></label>
+                <button id="leaveSave" class="border rounded-lg px-3 py-2">保存</button>
+                <button type="button" onclick="document.getElementById('leaveDialog').close()">取消</button>
+                <p id="leaveError" role="status"></p>
+            </form>
+        </dialog>
         <section class="bg-white p-4 rounded-xl shadow-sm space-y-3" aria-labelledby="overtimeHeading">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-2">
                 <h2 id="overtimeHeading" class="font-bold text-slate-800">📅 加班日历</h2>
@@ -207,6 +231,40 @@
                 </table>
             </div>
         </div>
+        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3" aria-labelledby="payrollHeading">
+            <h2 id="payrollHeading" class="font-bold">工资到账对账</h2>
+            <p id="payrollSummary" class="text-sm" aria-live="polite"></p>
+            <p id="payrollWarning" class="text-sm text-amber-800"></p>
+            <div class="flex flex-wrap gap-2">
+                <span id="bonusStatus" class="text-sm"></span>
+                <button id="bonusYes" onclick="confirmBonus(true)" class="border rounded-lg px-3 py-2">确认获得全勤奖 ¥100</button>
+                <button id="bonusNo" onclick="confirmBonus(false)" class="border rounded-lg px-3 py-2">确认无全勤奖</button>
+            </div>
+            <p class="text-xs text-slate-500">全勤奖月底手动确认，不根据默认出勤自动发放。锁定月份需先解锁才能修改扣件及全勤奖；到账仍可登记或作废。</p>
+            <form id="paymentForm" onsubmit="submitPayment(event)" class="space-y-3">
+                <p id="paymentMonthLabel" class="text-sm"></p>
+                <div class="grid grid-cols-2 gap-3">
+                    <label class="block text-sm">实际到账日期<input id="paymentDate" type="date" required class="block w-full border rounded-lg px-3 py-2"></label>
+                    <label class="block text-sm">到账金额（元）<input id="paymentAmount" type="number" min="0.01" max="100000000" step="0.01" required class="block w-full border rounded-lg px-3 py-2"></label>
+                </div>
+                <label class="block text-sm">备注<input id="paymentNote" maxlength="2000" class="block w-full border rounded-lg px-3 py-2" placeholder="如：第一笔工资"></label>
+                <button id="paymentSubmit" class="border rounded-lg px-3 py-2">登记到账</button>
+                <p id="paymentError" role="status" class="text-sm text-red-600"></p>
+            </form>
+            <div id="paymentList" class="space-y-2"></div>
+        </section>
+        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3" aria-labelledby="backupHeading">
+            <h2 id="backupHeading" class="font-bold">定时备份与恢复检查</h2>
+            <p class="text-sm">每天北京时间 03:00 自动备份，重启补最近一期；保留最近 30 份定时备份。手动及恢复前安全备份单独保留。</p>
+            <p id="backupStatus" class="text-sm" aria-live="polite">正在读取备份状态…</p>
+            <p class="text-xs text-slate-500">文件保存在本服务器。WebDAV 接口已预留，当前关闭。恢复前请下载备份，再通过顶部“恢复完整备份”检查并预览。</p>
+            <div class="flex flex-wrap gap-2">
+                <button id="backupNow" onclick="createLocalBackup()" class="border rounded-lg px-3 py-2">立即备份并检查</button>
+                <button id="backupRefresh" onclick="refreshBackupStatus()" class="border rounded-lg px-3 py-2">刷新状态</button>
+            </div>
+            <p id="backupActionStatus" role="status" class="text-sm"></p>
+            <div id="backupFiles" class="space-y-2"></div>
+        </section>
         <details class="bg-white p-4 rounded-xl shadow-sm">
             <summary class="font-bold cursor-pointer">已删除交件（当前周期）</summary>
             <div id="deletedRecords" class="mt-3"></div>
@@ -229,6 +287,20 @@
         </form>
     </dialog>
 
+    <dialog id="rejectionDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">
+        <form onsubmit="submitRejection(event)" class="space-y-3">
+            <h2 class="font-bold">不合格扣件</h2>
+            <p id="rejectionDescription" class="text-sm"></p>
+            <label class="block text-sm">累计不合格数量<input id="rejectionQuantity" type="number" min="0" step="1" required class="block w-full border rounded-lg px-3 py-2"></label>
+            <label class="block text-sm">原因<input id="rejectionReason" maxlength="2000" class="block w-full border rounded-lg px-3 py-2"></label>
+            <p class="text-xs text-slate-500">填写这条交件累计扣件数，不是本次新增数。填 0 可撤销扣件，原提交数量不变。</p>
+            <button id="rejectionSubmit" class="border rounded-lg px-3 py-2">保存扣件</button>
+            <button type="button" onclick="document.getElementById('rejectionDialog').close()">取消</button>
+            <p id="rejectionError" role="status" class="text-sm text-red-600"></p>
+        </form>
+    </dialog>
+    <script src="/static/payroll.js"></script>
+    <script src="/static/backups.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,3 +1,63 @@
+function renderDailyAttendance() {
+    const month = document.getElementById('monthSelect').value;
+    const att = currentState.attendance;
+    const active = Boolean(att.daily_mode);
+    const button = document.getElementById('enableDailyAttendance');
+    button.hidden = active || month === 'ALL';
+    button.disabled = overtimeSaving || currentState.locked;
+    document.getElementById('dailyAttendanceSummary').textContent = month === 'ALL'
+        ? '请选择具体月份查看出勤日历。'
+        : active ? `统计至 ${att.through_date}：日历 ${att.calendar_days} 天，请假 ${att.leave_hours.toFixed(2)} 小时，折算出勤 ${att.work_days.toFixed(2)} 天，正班 ${currentState.totals.regular_hours.toFixed(2)} 小时${currentState.locked ? '（已冻结）' : ''}`
+        : '本月保留原月度考勤。启用后以每日 8.5 小时重新核算正班，加班设置保留。';
+    const grid = document.getElementById('dailyAttendanceCalendar');
+    grid.replaceChildren();
+    if (!active || month === 'ALL') return;
+    ['一','二','三','四','五','六','日'].forEach(label => {
+        const cell = document.createElement('div'); cell.textContent = label; grid.append(cell);
+    });
+    const [year, m] = month.split('-').map(Number);
+    const first = new Date(year, m - 1, 1);
+    const count = new Date(year, m, 0).getDate();
+    for (let i = 0; i < (first.getDay() + 6) % 7; i++) grid.append(document.createElement('div'));
+    for (let day = 1; day <= count; day++) {
+        const key = `${month}-${String(day).padStart(2, '0')}`;
+        const leave = currentState.leave_days.find(item => item.work_date === key);
+        const future = key > att.through_date;
+        const cell = document.createElement('button');
+        cell.className = 'border rounded-lg py-2 text-center text-xs';
+        cell.textContent = `${day}日 ${future ? '未计入' : leave ? `请假${leave.hours}h` : '出勤8.5h'}`;
+        cell.disabled = future || currentState.locked || overtimeSaving;
+        cell.onclick = () => {
+            document.getElementById('leaveDate').value = key;
+            document.getElementById('leaveHours').value = leave ? leave.hours : 8.5;
+            document.getElementById('leaveNote').value = leave ? leave.note : '';
+            document.getElementById('leaveError').textContent = '';
+            document.getElementById('leaveDialog').showModal();
+        };
+        grid.append(cell);
+    }
+}
+
+async function enableDailyAttendance() {
+    const month = document.getElementById('monthSelect').value;
+    if (!confirm(`${month} 将按每天 8.5 小时、截至今天默认出勤重新计算，原月度手填出勤不再参与核算。确认启用？`)) return;
+    await mutate('/api/daily-attendance', 'PUT', {month});
+}
+
+async function saveLeaveDay(event) {
+    event.preventDefault();
+    const button = document.getElementById('leaveSave');
+    button.disabled = true;
+    try {
+        const saved = await mutate('/api/leave', 'PUT', {
+            work_date: document.getElementById('leaveDate').value,
+            hours: Number(document.getElementById('leaveHours').value),
+            note: document.getElementById('leaveNote').value
+        }, () => document.getElementById('leaveDialog').close());
+        if (!saved) document.getElementById('leaveError').textContent = document.getElementById('saveStatus').textContent;
+    } finally { button.disabled = false; }
+}
+
 let currentState = { records: [], part_types: [], attendance: {}, months: [] };
 let distinctDays = 0;
 let overtimeSaving = false;
@@ -145,7 +205,7 @@ function renderAll() {
     const totals = currentState.totals;
     document.getElementById('otSummaryText').textContent = `当前加班：${summary.count} 次（已记日期 ${summary.dated_count} 次，历史 ${summary.undated_count} 次）共 ${summary.hours.toFixed(1)} 小时 | 加班补贴 ¥${summary.subsidy.toFixed(2)}`;
     document.getElementById('statTotalPay').textContent = `¥${totals.total_pay.toFixed(2)}`;
-    document.getElementById('statPaySub').textContent = `计件 ¥${totals.piece_wage.toFixed(2)} + 补贴 ¥${summary.subsidy.toFixed(2)}`;
+    document.getElementById('statPaySub').textContent = `合格计件 ¥${totals.piece_wage.toFixed(2)} + 补贴 ¥${summary.subsidy.toFixed(2)} + 全勤 ¥${totals.attendance_bonus.toFixed(2)}`;
     document.getElementById('statDailyWage').textContent = `¥${totals.daily_wage.toFixed(2)}`;
     document.getElementById('statDaysSub').textContent = `按 ${totals.work_days} 天计算`;
     document.getElementById('statHourlyWage').textContent = `¥${totals.hourly_wage.toFixed(2)}`;
@@ -181,12 +241,13 @@ function renderRecordTable() {
         <tr class="hover:bg-slate-50">
             <td class="py-2.5 px-2">${escapeHtml(record.record_date)}</td>
             <td class="py-2.5 px-2 font-medium">${escapeHtml(record.part_name)}</td>
-            <td class="py-2.5 px-2 text-right">${record.quantity}</td>
+            <td class="py-2.5 px-2 text-right">提交 ${record.quantity}<br>扣 ${record.rejected_quantity} / 计薪 ${record.payable_quantity}</td>
             <td class="py-2.5 px-2 text-right">${record.unit_price === null ? '待定价' : `¥${record.unit_price.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`}</td>
             <td class="py-2.5 px-2 text-right">¥${record.amount.toFixed(2)}</td>
             <td class="py-2.5 px-2 text-xs break-words">${escapeHtml(record.note || '-')}</td>
             <td class="py-2.5 px-2 text-center whitespace-nowrap">
                 <button data-edit="${record.id}" data-write class="text-blue-600 text-xs">编辑</button>
+                <button data-rejection="${record.id}" data-write class="text-blue-600 text-xs">扣件</button>
                 <button data-delete="${record.id}" data-write class="text-red-600 text-xs ml-2">删除</button>
             </td>
         </tr>`).join('') || '<tr><td colspan="7" class="text-center py-6 text-slate-400 text-xs">没有符合条件的交件记录</td></tr>';
@@ -194,6 +255,8 @@ function renderRecordTable() {
 
 function renderOvertimeCalendar() {
     if (!currentState.totals) return;
+    renderDailyAttendance();
+    renderPayroll();
     const month = document.getElementById('monthSelect').value;
     const allMonths = month === 'ALL';
     const locked = currentState.locked;
@@ -205,6 +268,11 @@ function renderOvertimeCalendar() {
     document.querySelectorAll('[onchange="saveAttendance()"], [onclick^="adjustOtCount"], [onclick="syncWorkDaysFromRecords()"]')
         .forEach(element => { element.disabled = allMonths || locked || overtimeSaving; });
     document.getElementById('replaceUndatedLabel').classList.toggle('hidden', allMonths || summary.undated_count === 0);
+    if (currentState.attendance.daily_mode) {
+        document.getElementById('attDays').disabled = true;
+        document.getElementById('attDailyHours').disabled = true;
+        document.querySelector('[onclick="syncWorkDaysFromRecords()"]').disabled = true;
+    }
     if (allMonths || summary.undated_count === 0) document.getElementById('replaceUndated').checked = false;
     document.getElementById('replaceUndated').disabled = locked || overtimeSaving;
     document.querySelectorAll('[data-write]').forEach(element => { element.disabled = overtimeSaving; });
@@ -431,9 +499,13 @@ async function restoreBackup(input) {
     const file = input.files[0];
     if (!file) return;
     try {
-        if (file.size > 10 * 1024 * 1024) throw new Error('备份文件不能超过10MB');
+        if (file.size > 64 * 1024 * 1024) throw new Error('备份文件不能超过64MB');
         const payload = JSON.parse(await file.text());
-        if (!confirm('恢复将覆盖当前完整账本。服务器会先保存当前账本的安全备份，确认恢复？')) return;
+        showStatus('正在检查备份并进行临时数据库试恢复…');
+        const response = await apiRequest('/api/restore/preview', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+        const preview = await response.json();
+        const message = `备份检查通过\n生成时间：${preview.created_at}\n月份：${preview.months.join('、')}\n交件：${preview.counts.records} 条（含已删除）\n加班日期：${preview.counts.overtime_days} 条\n到账记录：${preview.counts.payments} 条\n累计应发：¥${preview.totals.total_pay.toFixed(2)}\n累计到账：¥${preview.paid.toFixed(2)}\n\n恢复将覆盖当前完整账本，服务器会先保存当前账本安全备份。确认恢复？`;
+        if (!confirm(message)) { showStatus('已取消恢复，账本未修改'); return; }
         await mutate('/api/restore', 'POST', payload, cancelRecordEdit);
     } catch (error) {
         showStatus(`恢复失败。${error.message}`);
@@ -454,6 +526,7 @@ document.getElementById('recordTableBody').addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
     if (button.dataset.edit) editRecord(Number(button.dataset.edit));
+    if (button.dataset.rejection) openRejection(Number(button.dataset.rejection));
     if (button.dataset.delete) deleteRecord(Number(button.dataset.delete));
 });
 document.getElementById('deletedRecords').addEventListener('click', event => {
@@ -462,3 +535,4 @@ document.getElementById('deletedRecords').addEventListener('click', event => {
 });
 document.getElementById('recDate').value = localDateKey();
 loadData().then(() => showStatus('账本已加载')).catch(error => showStatus(error.message));
+refreshBackupStatus();

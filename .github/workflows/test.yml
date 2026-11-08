@@ -12,3 +12,5 @@ jobs:
       - run: pip install -r requirements.txt httpx==0.28.1
       - run: python -m unittest discover -s tests -v
       - run: node --check static/app.js
+      - run: node --check static/payroll.js
+      - run: node --check static/backups.js
