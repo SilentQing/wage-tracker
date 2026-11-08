@@ -163,41 +163,18 @@
             <p class="text-xs text-slate-500 mt-3">日历加班会自动计入核算。上方历史次数用于保留旧记录，补记这些日期时可在日历中勾选“转为日期记录”。</p>
         </div>
 
-        <section class="bg-white p-4 rounded-xl shadow-sm space-y-3">
-            <h2 class="font-bold">每日出勤与请假</h2>
-            <p class="text-sm">每天正班 8.5 小时，周末正常出勤。截至今天默认上班，只需记录请假；未来日期不计入。</p>
-            <p id="dailyAttendanceSummary" class="text-sm" aria-live="polite"></p>
-            <button id="enableDailyAttendance" onclick="enableDailyAttendance()" class="border rounded-lg px-3 py-2">本月启用每日出勤</button>
-            <div id="dailyAttendanceCalendar" class="grid grid-cols-7 gap-1"></div>
-            <p class="text-xs text-slate-500">点击日期修改请假。出勤天数按实际正班工时 ÷ 8.5 折算；全天请假 8.5 小时，半天 4.25 小时。</p>
-        </section>
-        <dialog id="leaveDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">
-            <form onsubmit="saveLeaveDay(event)" class="space-y-3">
-                <h2 class="font-bold">记录请假</h2>
-                <input id="leaveDate" type="date" readonly class="border rounded-lg px-3 py-2">
-                <label class="block">请假小时<input id="leaveHours" type="number" min="0" max="8.5" step="0.01" required class="border rounded-lg px-3 py-2"></label>
-                <div class="flex gap-3">
-                    <button type="button" onclick="document.getElementById('leaveHours').value=8.5">全天</button>
-                    <button type="button" onclick="document.getElementById('leaveHours').value=4.25">半天</button>
-                    <button type="button" onclick="document.getElementById('leaveHours').value=0">恢复出勤</button>
-                </div>
-                <label class="block">备注<input id="leaveNote" maxlength="2000" class="border rounded-lg px-3 py-2"></label>
-                <button id="leaveSave" class="border rounded-lg px-3 py-2">保存</button>
-                <button type="button" onclick="document.getElementById('leaveDialog').close()">取消</button>
-                <p id="leaveError" role="status"></p>
-            </form>
-        </dialog>
         <section class="bg-white p-4 rounded-xl shadow-sm space-y-3" aria-labelledby="overtimeHeading">
             <div class="flex flex-wrap items-center justify-between gap-3 border-b pb-2">
-                <h2 id="overtimeHeading" class="font-bold text-slate-800">📅 加班日历</h2>
+                <h2 id="overtimeHeading" class="font-bold text-slate-800">📅 考勤日历</h2>
                 <div class="flex flex-wrap items-center gap-2">
                     <label for="calendarMonth" class="text-xs text-slate-500">查看月份</label>
                     <input id="calendarMonth" type="month" onchange="selectCalendarMonth(this.value)" class="border rounded-lg px-2 py-1.5 text-sm">
                     <button id="todayOvertime" disabled onclick="markTodayOvertime()" class="bg-amber-500 hover:bg-amber-600 text-white px-3 py-2 rounded-lg text-sm">✓ 今日加班</button>
-                    <button data-write onclick="openOvertimeEditor()" class="border px-3 py-2 rounded-lg text-sm">调整某天时长/补贴</button>
                 </div>
             </div>
-            <p class="text-xs text-slate-500">点击日期勾选加班，再点可取消。支持补记今天以前的日期，每天最多一次，未来日期不可勾选。日期按浏览器本地时间显示。</p>
+            <p class="text-xs text-slate-500">正班、请假、加班合并显示，点击日期修改。每日出勤启用后每天默认 8.5 小时，周末正常出勤；未来日期不计入。</p>
+            <button id="enableDailyAttendance" onclick="enableDailyAttendance()" class="border rounded-lg px-3 py-2">本月启用每日出勤</button>
+            <p id="dailyAttendanceSummary" class="text-sm" aria-live="polite"></p>
             <label id="replaceUndatedLabel" class="flex items-center gap-2 text-sm text-amber-800 bg-amber-50 p-2 rounded-lg">
                 <input type="checkbox" id="replaceUndated">
                 补记历史加班时，将本月 1 次未分配日期的历史加班转为日期记录
@@ -205,9 +182,11 @@
             <p id="calendarSummary" class="text-sm font-medium text-blue-600" aria-live="polite"></p>
             <p id="calendarStatus" class="text-sm text-red-600" role="status"></p>
             <div id="overtimeCalendar" class="grid grid-cols-7 gap-1"></div>
-            <h3 class="text-sm font-bold pt-2">每周加班汇总（周一至周日）</h3>
+            <details>
+            <summary class="text-sm font-bold cursor-pointer">每周加班汇总（点击展开）</summary>
             <p class="text-xs text-slate-500">跨月的一周显示完整周数据，月度工资只计算本月。未分配日期的历史加班仅计入月度汇总。</p>
             <div id="overtimeWeeks" class="space-y-2"></div>
+            </details>
         </section>
 
         <div class="bg-white p-4 rounded-xl shadow-sm">
@@ -276,15 +255,36 @@
     </div>
 
     <dialog id="overtimeDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">
+        <h2 id="dayEditorTitle" class="font-bold">当天考勤</h2>
+        <p id="leaveModeHint" class="text-xs text-slate-500"></p>
+        <form onsubmit="saveLeaveDay(event)" class="space-y-3">
+            <fieldset id="leaveFields" class="space-y-3 border-b py-2">
+                <legend class="font-bold">请假</legend>
+                <input id="leaveDate" type="hidden">
+                <label class="block text-sm">请假小时<input id="leaveHours" type="number" min="0" max="8.5" step="0.01" required class="block w-full border rounded-lg px-3 py-2"></label>
+                <div class="flex gap-3">
+                    <button type="button" onclick="document.getElementById('leaveHours').value=8.5">全天</button>
+                    <button type="button" onclick="document.getElementById('leaveHours').value=4.25">半天</button>
+                    <button type="button" onclick="document.getElementById('leaveHours').value=0">恢复出勤</button>
+                </div>
+                <label class="block text-sm">请假备注<input id="leaveNote" maxlength="2000" class="block w-full border rounded-lg px-3 py-2"></label>
+                <button id="leaveSave" class="border rounded-lg px-3 py-2">保存请假</button>
+            </fieldset>
+            <p id="leaveError" role="status" class="text-sm"></p>
+        </form>
         <form onsubmit="saveCustomOvertime(event)" class="space-y-3">
-            <h2 class="font-bold">调整某天加班</h2>
-            <label class="block text-sm">日期<input id="customOtDate" type="date" required onchange="fillOvertimeEditor()" class="block w-full border rounded-lg px-3 py-2"></label>
+            <fieldset id="dayOvertimeFields" class="space-y-3 py-2">
+            <legend class="font-bold">加班</legend>
+            <input id="customOtDate" type="hidden">
             <label class="block text-sm">加班时长（小时）<input id="customOtHours" type="number" min="0" max="24" step="0.1" required class="block w-full border rounded-lg px-3 py-2"></label>
             <label class="block text-sm">当天补贴（元）<input id="customOtSubsidy" type="number" min="0" max="100000000" step="0.01" required class="block w-full border rounded-lg px-3 py-2"></label>
             <label class="block text-sm"><input id="customOtDefaults" type="checkbox"> 恢复按所属月份默认设置计算</label>
-            <p class="text-xs text-slate-500">保存会记录该日期加班。历史次数补日期请使用月历转换选项。</p>
-            <div class="flex gap-3"><button data-write class="bg-blue-600 text-white px-4 py-2 rounded-lg">保存当天加班</button><button type="button" onclick="document.getElementById('overtimeDialog').close()" class="border px-4 py-2 rounded-lg">取消</button></div>
+            <p class="text-xs text-slate-500">保存会记录当天加班；若日历勾选历史次数转换，将扣减一次未分配日期的加班。</p>
+            <div class="flex gap-3"><button id="dayOvertimeSave" class="bg-blue-600 text-white px-4 py-2 rounded-lg">保存加班</button><button type="button" id="dayOvertimeCancel" onclick="cancelDayOvertime()" class="border px-4 py-2 rounded-lg">取消加班</button></div>
+            </fieldset>
+            <p id="dayOvertimeStatus" role="status" class="text-sm"></p>
         </form>
+        <button type="button" id="dayClose" onclick="document.getElementById('overtimeDialog').close()" class="border px-4 py-2 rounded-lg">关闭</button>
     </dialog>
 
     <dialog id="rejectionDialog" class="rounded-xl p-5 max-w-sm w-full shadow-xl">

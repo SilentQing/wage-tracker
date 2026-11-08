@@ -9,33 +9,6 @@ function renderDailyAttendance() {
         ? '请选择具体月份查看出勤日历。'
         : active ? `统计至 ${att.through_date}：日历 ${att.calendar_days} 天，请假 ${att.leave_hours.toFixed(2)} 小时，折算出勤 ${att.work_days.toFixed(2)} 天，正班 ${currentState.totals.regular_hours.toFixed(2)} 小时${currentState.locked ? '（已冻结）' : ''}`
         : '本月保留原月度考勤。启用后以每日 8.5 小时重新核算正班，加班设置保留。';
-    const grid = document.getElementById('dailyAttendanceCalendar');
-    grid.replaceChildren();
-    if (!active || month === 'ALL') return;
-    ['一','二','三','四','五','六','日'].forEach(label => {
-        const cell = document.createElement('div'); cell.textContent = label; grid.append(cell);
-    });
-    const [year, m] = month.split('-').map(Number);
-    const first = new Date(year, m - 1, 1);
-    const count = new Date(year, m, 0).getDate();
-    for (let i = 0; i < (first.getDay() + 6) % 7; i++) grid.append(document.createElement('div'));
-    for (let day = 1; day <= count; day++) {
-        const key = `${month}-${String(day).padStart(2, '0')}`;
-        const leave = currentState.leave_days.find(item => item.work_date === key);
-        const future = key > att.through_date;
-        const cell = document.createElement('button');
-        cell.className = 'border rounded-lg py-2 text-center text-xs';
-        cell.textContent = `${day}日 ${future ? '未计入' : leave ? `请假${leave.hours}h` : '出勤8.5h'}`;
-        cell.disabled = future || currentState.locked || overtimeSaving;
-        cell.onclick = () => {
-            document.getElementById('leaveDate').value = key;
-            document.getElementById('leaveHours').value = leave ? leave.hours : 8.5;
-            document.getElementById('leaveNote').value = leave ? leave.note : '';
-            document.getElementById('leaveError').textContent = '';
-            document.getElementById('leaveDialog').showModal();
-        };
-        grid.append(cell);
-    }
 }
 
 async function enableDailyAttendance() {
@@ -53,7 +26,7 @@ async function saveLeaveDay(event) {
             work_date: document.getElementById('leaveDate').value,
             hours: Number(document.getElementById('leaveHours').value),
             note: document.getElementById('leaveNote').value
-        }, () => document.getElementById('leaveDialog').close());
+        }, () => { document.getElementById('leaveError').textContent = '请假已保存'; });
         if (!saved) document.getElementById('leaveError').textContent = document.getElementById('saveStatus').textContent;
     } finally { button.disabled = false; }
 }
@@ -265,6 +238,9 @@ function renderOvertimeCalendar() {
     document.getElementById('calendarMonth').disabled = overtimeSaving;
     document.getElementById('monthSelect').disabled = overtimeSaving;
     document.getElementById('todayOvertime').disabled = overtimeSaving;
+    document.getElementById('leaveFields').disabled = !currentState.attendance.daily_mode || locked || overtimeSaving;
+    document.getElementById('dayOvertimeFields').disabled = locked || overtimeSaving;
+    document.getElementById('dayClose').disabled = overtimeSaving;
     document.querySelectorAll('[onchange="saveAttendance()"], [onclick^="adjustOtCount"], [onclick="syncWorkDaysFromRecords()"]')
         .forEach(element => { element.disabled = allMonths || locked || overtimeSaving; });
     document.getElementById('replaceUndatedLabel').classList.toggle('hidden', allMonths || summary.undated_count === 0);
@@ -318,16 +294,31 @@ function renderOvertimeCalendar() {
         const button = document.createElement('button');
         button.type = 'button';
         button.disabled = !inMonth || key > today || locked || overtimeSaving;
-        button.setAttribute('aria-pressed', String(Boolean(entry)));
-        button.setAttribute('aria-label', `${key}${entry ? ' 已加班，点击取消' : ' 未记录加班，点击勾选'}`);
+        const leave = currentState.leave_days.find(item => item.work_date === key);
+        const att = currentState.attendance;
+        const attendanceText = !inMonth ? '' : !att.daily_mode ? '月度考勤'
+            : key > att.through_date ? '未计入' : `正班 ${Number((8.5 - (leave ? leave.hours : 0)).toFixed(2))}h`;
+        button.setAttribute('aria-label', `${key} ${attendanceText}${leave ? ` 请假 ${leave.hours} 小时` : ''}${entry ? ` 加班 ${entry.hours} 小时` : ''}，点击修改当天考勤`);
         button.dataset.date = key;
         button.className = `min-h-16 border rounded-lg py-2 text-center text-xs disabled:cursor-default ${entry ? 'bg-amber-100 border-amber-400 text-amber-900' : 'bg-slate-50 border-slate-200'} ${inMonth ? '' : 'opacity-40'} ${key === today ? 'ring-2 ring-blue-400' : ''}`;
         button.textContent = `${cursor.getDate()}${key === today ? ' 今天' : ''}`;
         const status = document.createElement('span');
         status.className = 'block mt-1 text-xs';
-        status.textContent = entry ? `✓ ${entry.hours}h` : '—';
+        status.textContent = attendanceText;
         button.appendChild(status);
-        button.addEventListener('click', () => setOvertime(key, !entry));
+        if (leave && inMonth) {
+            const leaveLabel = document.createElement('span');
+            leaveLabel.className = 'block text-xs text-red-600';
+            leaveLabel.textContent = `请假 ${leave.hours}h`;
+            button.appendChild(leaveLabel);
+        }
+        if (entry) {
+            const overtimeLabel = document.createElement('span');
+            overtimeLabel.className = 'block text-xs';
+            overtimeLabel.textContent = `加班 ${entry.hours}h`;
+            button.appendChild(overtimeLabel);
+        }
+        button.addEventListener('click', () => openDayEditor(key));
         grid.appendChild(button);
         if (entry) {
             weekCount += 1;
@@ -368,28 +359,43 @@ function markTodayOvertime() {
     setOvertime(localDateKey(), true, false);
 }
 
-function openOvertimeEditor() {
-    const month = document.getElementById('monthSelect').value;
-    document.getElementById('customOtDate').value = month !== 'ALL' && month !== localDateKey().slice(0, 7) ? `${month}-01` : localDateKey();
+function openDayEditor(day) {
+    if (overtimeSaving || currentState.locked || day > localDateKey()) return;
+    const leave = currentState.leave_days.find(item => item.work_date === day);
+    document.getElementById('dayEditorTitle').textContent = `${day} 考勤`;
+    document.getElementById('leaveDate').value = day;
+    document.getElementById('leaveHours').value = leave ? leave.hours : 0;
+    document.getElementById('leaveNote').value = leave ? leave.note : '';
+    document.getElementById('leaveError').textContent = '';
+    document.getElementById('dayOvertimeStatus').textContent = '';
+    document.getElementById('leaveModeHint').textContent = currentState.attendance.daily_mode
+        ? '全天请假 8.5 小时，半天 4.25 小时；请假与加班分别保存。'
+        : '本月尚未启用每日出勤，可修改加班；记录请假前请先在日历上方启用。';
+    document.getElementById('customOtDate').value = day;
     fillOvertimeEditor();
     document.getElementById('overtimeDialog').showModal();
 }
 
 function fillOvertimeEditor() {
     const day = currentState.overtime_days.find(item => item.work_date === document.getElementById('customOtDate').value);
-    document.getElementById('customOtHours').value = day ? day.hours : currentState.attendance.hours_per_ot || 2.5;
+    document.getElementById('customOtHours').value = day ? day.hours : currentState.attendance.hours_per_ot ?? 2.5;
     document.getElementById('customOtSubsidy').value = day ? day.subsidy : currentState.attendance.subsidy_per_ot ?? 10;
     document.getElementById('customOtDefaults').checked = false;
 }
 
 async function saveCustomOvertime(event) {
     event.preventDefault();
-    const saved = await setOvertime(document.getElementById('customOtDate').value, true, false, {
+    const saved = await setOvertime(document.getElementById('customOtDate').value, true, document.getElementById('replaceUndated').checked, {
         hours: Number(document.getElementById('customOtHours').value),
         subsidy: Number(document.getElementById('customOtSubsidy').value),
         use_month_defaults: document.getElementById('customOtDefaults').checked
     });
-    if (saved) document.getElementById('overtimeDialog').close();
+    document.getElementById('dayOvertimeStatus').textContent = saved ? '加班已保存' : document.getElementById('saveStatus').textContent;
+}
+
+async function cancelDayOvertime() {
+    const saved = await setOvertime(document.getElementById('customOtDate').value, false, false);
+    document.getElementById('dayOvertimeStatus').textContent = saved ? '加班已取消' : document.getElementById('saveStatus').textContent;
 }
 
 function cancelRecordEdit() {
