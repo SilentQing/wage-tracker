@@ -14,3 +14,4 @@ jobs:
       - run: node --check static/app.js
       - run: node --check static/payroll.js
       - run: node --check static/backups.js
+      - run: node --check static/submissions.js

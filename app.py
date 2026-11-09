@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import calendar
 import csv
 import io
@@ -26,6 +27,7 @@ DB_PATH = os.environ.get("WAGE_DB_PATH", "data/wage.db")
 Name = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 Money = Annotated[Decimal, Field(ge=0, le=100000000, allow_inf_nan=False)]
 Hours = Annotated[float, Field(ge=0, le=24, allow_inf_nan=False)]
+SubmissionId = Annotated[str, StringConstraints(pattern=r'^[a-zA-Z0-9-]{16,64}$')]
 
 @asynccontextmanager
 async def lifespan(application):
@@ -153,6 +155,10 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
             action TEXT NOT NULL, detail TEXT NOT NULL
         )""")
+        conn.execute('CREATE TABLE IF NOT EXISTS record_requests (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, record_id INTEGER NOT NULL)')
+        conn.execute('CREATE TABLE IF NOT EXISTS submission_cancellations (kind TEXT NOT NULL, request_id TEXT NOT NULL, PRIMARY KEY(kind,request_id))')
+        conn.execute('CREATE TABLE IF NOT EXISTS submission_identity (id INTEGER PRIMARY KEY CHECK(id=1), epoch TEXT NOT NULL)')
+        conn.execute('INSERT OR IGNORE INTO submission_identity VALUES (1,?)', (uuid4().hex,))
         conn.execute("INSERT OR IGNORE INTO part_types VALUES ('定距筒', 0)")
         conn.execute("""DELETE FROM part_types WHERE name = '庆祝'
             AND NOT EXISTS (SELECT 1 FROM records WHERE part_name = '庆祝')""")
@@ -170,6 +176,57 @@ class RecordCreate(BaseModel):
     quantity: int = Field(gt=0, le=100000000)
     note: Optional[str] = Field(default="", max_length=2000)
     unit_price: Optional[Money] = None
+
+
+class RecordSubmission(RecordCreate):
+    request_id: Optional[SubmissionId] = None
+    submission_epoch: Optional[SubmissionId] = None
+
+
+def submission_epoch(conn):
+    row = conn.execute('SELECT epoch FROM submission_identity WHERE id=1').fetchone()
+    return row[0] if row else None
+
+
+def check_submission_epoch(conn, epoch):
+    if epoch is not None and epoch != submission_epoch(conn):
+        raise HTTPException(409, '账本已恢复或切换；旧提交不能重试，请人工核对后取消本机待确认提示')
+
+
+def submission_result(conn, kind, request_id):
+    if kind == 'records':
+        row = conn.execute('SELECT r.id,r.deleted FROM record_requests q JOIN records r ON r.id=q.record_id WHERE q.request_id=?', (request_id,)).fetchone()
+    else:
+        row = conn.execute('SELECT id,voided FROM payments WHERE id=?', (request_id,)).fetchone()
+    if row:
+        return dict(state='saved', **dict(row))
+    if conn.execute('SELECT 1 FROM submission_cancellations WHERE kind=? AND request_id=?', (kind, request_id)).fetchone():
+        return dict(state='cancelled')
+    return dict(state='absent')
+
+
+def ensure_not_cancelled(conn, kind, request_id):
+    if conn.execute('SELECT 1 FROM submission_cancellations WHERE kind=? AND request_id=?', (kind, request_id)).fetchone():
+        raise HTTPException(409, '该次提交已取消，不能重试；如需登记请新建一次提交')
+
+
+@app.get('/api/submissions/{kind}/{request_id}')
+def check_submission(kind: Literal['records', 'payments'], request_id: SubmissionId, epoch: SubmissionId):
+    with database() as conn:
+        check_submission_epoch(conn, epoch)
+        return submission_result(conn, kind, request_id)
+
+
+@app.post('/api/submissions/{kind}/{request_id}/cancel')
+def cancel_submission(kind: Literal['records', 'payments'], request_id: SubmissionId, epoch: SubmissionId):
+    with database(write=True) as conn:
+        check_submission_epoch(conn, epoch)
+        result = submission_result(conn, kind, request_id)
+        if result['state'] == 'absent':
+            conn.execute('INSERT INTO submission_cancellations VALUES (?,?)', (kind, request_id))
+            audit(conn, '取消待确认提交', dict(kind=kind, request_id=request_id))
+            result = dict(state='cancelled')
+        return result
 
 
 class PriceUpdate(BaseModel):
@@ -359,7 +416,7 @@ def ledger_data(conn, month):
                   hourly_wage=amount(money(total_pay) / money(total_hours)) if total_hours else 0)
     locks = [row[0] for row in conn.execute("SELECT month FROM month_locks")]
     legacy_all = conn.execute("SELECT * FROM attendance WHERE month = 'ALL'").fetchone()
-    return dict(records=records, deleted_records=[row for row in rows if row["deleted"]],
+    return dict(records=records, deleted_records=[row for row in rows if row["deleted"]], submission_epoch=submission_epoch(conn),
                 reconciliation=reconciliation, payments=payments,
                 leave_days=[dict(row) for row in conn.execute("SELECT * FROM leave_days ORDER BY work_date") if month == 'ALL' or row['work_date'].startswith(month)],
                 part_types=[dict(row) for row in conn.execute("SELECT * FROM part_types ORDER BY name")],
@@ -386,15 +443,29 @@ def record_values(item):
 
 
 @app.post("/api/records")
-def add_record(item: RecordCreate):
+def add_record(item: RecordSubmission):
+    original = item.model_dump(mode='json', exclude={'request_id', 'submission_epoch'})
+    original['note'] = item.note or ''
+    original['unit_price'] = format(item.unit_price.normalize(), 'f') if item.unit_price is not None else None
+    fingerprint = hashlib.sha256(json.dumps(original, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     with database(write=True) as conn:
+        check_submission_epoch(conn, item.submission_epoch)
+        if item.request_id:
+            ensure_not_cancelled(conn, 'records', item.request_id)
+            previous = conn.execute('SELECT * FROM record_requests WHERE request_id=?', (item.request_id,)).fetchone()
+            if previous:
+                if previous['fingerprint'] != fingerprint:
+                    raise HTTPException(409, '该提交标识已保存其他交件内容，请先核对原提交')
+                return dict(status='ok', **submission_result(conn, 'records', item.request_id))
         ensure_editable(conn, item.record_date.isoformat()[:7])
         conn.execute("INSERT OR IGNORE INTO part_types VALUES (?, 0)", (item.part_name,))
         price = float(item.unit_price) if item.unit_price is not None else default_price(conn, item.part_name)
         cursor = conn.execute("""INSERT INTO records (record_date, part_name, quantity, note, unit_price)
             VALUES (?, ?, ?, ?, ?)""", (*record_values(item), price))
         audit(conn, "新增交件", {"id": cursor.lastrowid, **item.model_dump(mode="json"), "unit_price": price})
-        return {"status": "ok", "id": cursor.lastrowid}
+        if item.request_id:
+            conn.execute('INSERT INTO record_requests VALUES (?,?,?)', (item.request_id, fingerprint, cursor.lastrowid))
+        return {"status": "ok", "state": "saved", "id": cursor.lastrowid, "deleted": 0}
 
 
 @app.put("/api/records/{record_id}")
@@ -598,6 +669,10 @@ class PaymentCreate(BaseModel):
     note: str = Field(default='', max_length=2000)
 
 
+class PaymentSubmission(PaymentCreate):
+    submission_epoch: Optional[SubmissionId] = None
+
+
 @app.put('/api/records/{record_id}/rejection')
 def save_rejection(record_id: int, item: RejectionUpdate):
     with database(write=True) as conn:
@@ -628,20 +703,22 @@ def save_attendance_bonus(item: BonusUpdate):
 
 
 @app.post('/api/payments')
-def add_payment(item: PaymentCreate):
+def add_payment(item: PaymentSubmission):
     month_start(item.month)
     if item.paid_date > date.today():
         raise HTTPException(400, '到账日期不能在未来')
     values = dict(id=item.id, month=item.month, paid_date=item.paid_date.isoformat(), amount=format(item.amount, '.2f'), note=item.note)
     with database(write=True) as conn:
+        check_submission_epoch(conn, item.submission_epoch)
+        ensure_not_cancelled(conn, 'payments', item.id)
         existing = conn.execute('SELECT * FROM payments WHERE id=?', (item.id,)).fetchone()
         if existing:
             if any(str(existing[key]) != str(value) for key, value in values.items()):
                 raise HTTPException(409, '该请求已登记其他到账内容，请刷新核对')
-            return {'status': 'ok', 'id': item.id, 'voided': existing['voided']}
+            return {'status': 'ok', 'state': 'saved', 'id': item.id, 'voided': existing['voided']}
         conn.execute('INSERT INTO payments(id,month,paid_date,amount,note) VALUES (?,?,?,?,?)', tuple(values.values()))
         audit(conn, '登记工资到账', values)
-    return {'status': 'ok', 'id': item.id}
+    return {'status': 'ok', 'state': 'saved', 'id': item.id, 'voided': 0}
 
 
 @app.delete('/api/payments/{payment_id}')
@@ -656,7 +733,7 @@ def void_payment(payment_id: str):
     return {'status': 'ok'}
 
 
-BACKUP_TABLES = ("part_types", "records", "attendance", "overtime_days", "month_locks", "audit_log", "daily_months", "leave_days", "rejections", "attendance_bonuses", "payments")
+BACKUP_TABLES = ("part_types", "records", "attendance", "overtime_days", "month_locks", "audit_log", "daily_months", "leave_days", "rejections", "attendance_bonuses", "payments", "record_requests", "submission_cancellations")
 
 
 def backup_payload(conn):
@@ -729,6 +806,17 @@ class BackupPayment(PaymentCreate):
     voided: Literal[0, 1] = 0
 
 
+class BackupRecordRequest(BaseModel):
+    request_id: SubmissionId
+    fingerprint: Annotated[str, StringConstraints(pattern=r'^[a-f0-9]{64}$')]
+    record_id: int = Field(gt=0)
+
+
+class BackupCancellation(BaseModel):
+    kind: Literal['records', 'payments']
+    request_id: SubmissionId
+
+
 class BackupTables(BaseModel):
     model_config = ConfigDict(extra="forbid")
     part_types: list[BackupPart] = Field(max_length=10000)
@@ -742,6 +830,8 @@ class BackupTables(BaseModel):
     rejections: list[BackupRejection] = Field(default_factory=list, max_length=100000)
     attendance_bonuses: list[BackupBonus] = Field(default_factory=list, max_length=120000)
     payments: list[BackupPayment] = Field(default_factory=list, max_length=100000)
+    record_requests: list[BackupRecordRequest] = Field(default_factory=list, max_length=100000)
+    submission_cancellations: list[BackupCancellation] = Field(default_factory=list, max_length=100000)
 
 
 class BackupPayload(BaseModel):
@@ -753,6 +843,13 @@ class BackupPayload(BaseModel):
 def validate_backup_tables(payload: BackupPayload):
     tables = payload.tables.model_dump(mode="json")
     records_by_id = {row['id']: row for row in tables['records']}
+    for row in tables['record_requests']:
+        if row['record_id'] not in records_by_id:
+            raise HTTPException(400, '交件提交标识引用了不存在的记录')
+    saved_requests = {('records', row['request_id']) for row in tables['record_requests']}
+    saved_requests.update(('payments', row['id']) for row in tables['payments'])
+    if any((row['kind'], row['request_id']) in saved_requests for row in tables['submission_cancellations']):
+        raise HTTPException(400, '提交取消标记与已保存记录冲突')
     for row in tables['rejections']:
         original = records_by_id.get(row['record_id'])
         if not original or row['quantity'] > original['quantity']:
@@ -859,6 +956,14 @@ def recheck_server_backup(name: str):
         raise HTTPException(400, '备份不存在、内容损坏或校验未通过')
 
 
+@app.post('/api/backups/remote/retry')
+def retry_remote_backups():
+    try:
+        return make_backup_service().retry_remote()
+    except ValueError as error:
+        raise HTTPException(409, str(error))
+
+
 @app.get('/api/backups/{name}/download')
 def download_server_backup(name: str):
     try:
@@ -886,6 +991,7 @@ def restore_backup(payload: BackupPayload):
             temporary.write_text(json.dumps(backup_payload(conn), ensure_ascii=False), encoding="utf-8")
             temporary.replace(safety_file)
             insert_backup_tables(conn, tables)
+            conn.execute('UPDATE submission_identity SET epoch=? WHERE id=1', (uuid4().hex,))
             audit(conn, "恢复完整备份", {"safety_backup": safety_file.name})
     except sqlite3.IntegrityError:
         raise HTTPException(400, "备份包含重复或冲突数据，账本已保持原样")
@@ -893,14 +999,20 @@ def restore_backup(payload: BackupPayload):
 
 
 @app.get("/api/export")
-def export_csv(month: str = "ALL", kind: Literal["records", "overtime"] = "records"):
+def export_csv(month: str = "ALL", kind: Literal["records", "overtime", "statement"] = "records"):
+    if kind == "statement":
+        if month == "ALL":
+            raise HTTPException(400, "请选择具体月份后导出月结单")
+        month_start(month)
     with database() as conn:
         data = ledger_data(conn, month)
         condition = "month != 'ALL'" if month == "ALL" else "month = ?"
         legacy = list(conn.execute(f"SELECT * FROM attendance WHERE {condition}", () if month == "ALL" else (month,)))
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    if kind == "records":
+    if kind == "statement":
+        write_monthly_statement(writer, data, legacy, month)
+    elif kind == "records":
         writer.writerow(["日期", "种类", "提交数量", "记录单价", "合格计件金额", "备注", "不合格数量", "计薪数量", "扣件金额", "扣件原因"])
         for row in data["records"]:
             writer.writerow([csv_text(row["record_date"]), csv_text(row["part_name"]), row["quantity"],
@@ -916,6 +1028,79 @@ def export_csv(month: str = "ALL", kind: Literal["records", "overtime"] = "recor
                                  amount(money(row["overtime_count"]) * money(row["subsidy_per_ot"] if row["subsidy_per_ot"] is not None else 10)), f"未分配日期 {row['overtime_count']} 次"])
     return Response(output.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
                     headers={"Content-Disposition": f'attachment; filename="wage-{kind}-{month}.csv"'})
+
+
+def write_monthly_statement(writer, data, legacy, month):
+    totals, info, att = data['totals'], data['reconciliation'], data['attendance']
+    ot = data['overtime_summary']
+    yuan = lambda value: format(money(value), '.2f')
+    number = lambda value: format(money(value).quantize(Decimal('0.000001'), rounding=ROUND_HALF_UP), 'f').rstrip('0').rstrip('.') or '0'
+    writer.writerows([
+        ['完整月结单'],
+        ['工资所属月份', month],
+        ['导出时间（北京时间）', datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds')],
+        ['锁定状态', '已锁定' if data['locked'] else '未锁定'],
+        ['说明', '当前账本快照；到账按工资所属月份归集，作废到账不计合计。'],
+        [], ['出勤汇总'],
+        ['考勤模式', '每日出勤' if att.get('daily_mode') else '旧月度考勤'],
+        ['考勤截止日期', att.get('through_date', '按月度填写值')],
+        ['出勤天数（折算）', number(totals['work_days'])],
+        ['正班工时（小时）', number(totals['regular_hours'])],
+        ['请假时长（小时）', number(att['leave_hours']) if att.get('daily_mode') else '未记录（旧月度考勤）'],
+        ['加班次数', ot['count']], ['加班工时（小时）', number(ot['hours'])],
+        ['总工时（小时）', number(totals['total_hours'])],
+        [], ['工资组成'],
+        ['原计件金额（元）', yuan(sum((money(row['gross_amount']) for row in data['records']), Decimal(0)))],
+        ['不合格扣件（元）', yuan(totals['rejection_deduction'])],
+        ['合格计件金额（元）', yuan(totals['piece_wage'])],
+        ['加班补贴（元）', yuan(ot['subsidy'])],
+        ['全勤奖（元）', yuan(totals['attendance_bonus'])],
+        ['全勤确认', '未确认（暂计0元）' if info['bonus_awarded'] is None else '已确认有奖' if info['bonus_awarded'] else '已确认无奖'],
+        ['应发工资（元）', yuan(totals['total_pay'])],
+        ['平均日薪（元）', yuan(totals['daily_wage'])],
+        ['实际时薪（元）', yuan(totals['hourly_wage'])],
+        [], ['到账对账'],
+        ['有效到账合计（元）', yuan(info['paid'])],
+        ['未到账金额（元）', yuan(max(0, info['difference']))],
+        ['超额到账金额（元）', yuan(max(0, -info['difference']))],
+        ['对账状态（按当前已记金额）', info['status']],
+        [], ['核对提示'],
+    ])
+    warnings = []
+    if info['pending_prices']:
+        warnings.append('存在待定价交件，相关金额暂计0元，应发尚不完整。')
+    if info['unconfirmed_bonus_months']:
+        warnings.append('全勤奖未确认，暂计0元；对账状态不代表最终核薪完成。')
+    if ot['undated_count']:
+        warnings.append(f"存在未分配日期的历史加班 {ot['undated_count']} 次，已计入汇总。")
+    if not data['locked']:
+        warnings.append('月份未锁定，后续补记、调账或每日出勤累计会改变结果。')
+    for warning in warnings or ['无待定价、未确认全勤奖或未分配历史加班提示。']:
+        writer.writerow([warning])
+    writer.writerows([[], ['交件明细（不含已删除）'], ['日期', '种类', '提交数量', '单价（元）', '原金额（元）', '不合格数量', '计薪数量', '扣件金额（元）', '合格金额（元）', '扣件原因', '备注']])
+    for row in data['records']:
+        writer.writerow([csv_text(row['record_date']), csv_text(row['part_name']), row['quantity'],
+                         row['unit_price'] if row['unit_price'] is not None else '待定价', yuan(row['gross_amount']),
+                         row['rejected_quantity'], row['payable_quantity'], yuan(row['deduction_amount']),
+                         yuan(row['amount']), csv_text(row['rejection_reason']), csv_text(row['note'])])
+    writer.writerows([[], ['请假明细'], ['日期', '请假小时', '备注']])
+    for row in data['leave_days']:
+        writer.writerow([row['work_date'], number(row['hours']), csv_text(row['note'])])
+    if not data['leave_days']:
+        writer.writerow(['无请假记录' if att.get('daily_mode') else '未记录（旧月度考勤）'])
+    writer.writerows([[], ['加班明细'], ['日期或月份', '时长（小时）', '补贴（元）', '类型']])
+    for row in data['overtime_days']:
+        if row['work_date'].startswith(month):
+            writer.writerow([row['work_date'], number(row['hours']), yuan(row['subsidy']), '已记日期'])
+    for row in legacy:
+        count = row['overtime_count'] or 0
+        if count:
+            writer.writerow([row['month'], number(count * (row['hours_per_ot'] if row['hours_per_ot'] is not None else 2.5)),
+                             yuan(count * money(row['subsidy_per_ot'] if row['subsidy_per_ot'] is not None else 10)), f'未分配日期 {count} 次'])
+    writer.writerows([[], ['到账明细（含作废记录）'], ['工资所属月份', '到账日期', '金额（元）', '状态', '备注', '记录编号']])
+    for row in data['payments']:
+        writer.writerow([row['month'], row['paid_date'], yuan(row['amount']),
+                         '已作废（不计入合计）' if row['voided'] else '有效', csv_text(row['note']), csv_text(row['id'])])
 
 
 def csv_text(value):

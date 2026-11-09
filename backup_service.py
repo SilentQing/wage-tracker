@@ -1,4 +1,4 @@
-"""Local scheduled backups; remote adapter is deliberately not enabled."""
+"""Verified local backups and a persistent, independent WebDAV upload queue."""
 import hashlib
 import json
 import logging
@@ -10,24 +10,12 @@ import threading
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from webdav_client import WebDAVAdapter, WebDAVError
 
 MAX_BACKUP_BYTES = 64 * 1024 * 1024
 CHINA = timezone(timedelta(hours=8))
 NAME = re.compile(r'^(scheduled|manual)-\d{8}T\d{12}-[a-f0-9]{32}\.json$')
 logger = logging.getLogger(__name__)
-
-
-class WebDAVAdapter:
-    """Future extension point. No network activity in this implementation.
-
-    Reserved environment variables: WAGE_WEBDAV_URL, WAGE_WEBDAV_USERNAME,
-    WAGE_WEBDAV_PASSWORD. Credentials must never enter backup payload or status.
-    A future implementation should PUT to the configured collection over HTTPS,
-    reject redirects, set bounded timeouts, and report upload separately from
-    local verification. Local backup must survive remote failures.
-    """
-    def upload(self, path: Path, sha256: str):
-        raise NotImplementedError('WebDAV 仅预留接口，尚未实现上传')
 
 
 def atomic_write(path, raw):
@@ -49,11 +37,19 @@ class BackupService:
         self.verify = verify
         self.stop_event = threading.Event()
         self.thread = None
+        self.remote_thread = None
+        self.remote = WebDAVAdapter()
 
     def connect(self):
         self.directory.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.directory / 'backup-control.sqlite3', timeout=30)
         conn.execute('CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        conn.execute('''CREATE TABLE IF NOT EXISTS remote_jobs (
+            destination TEXT NOT NULL, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            attempts INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL DEFAULT 0,
+            lease_until REAL NOT NULL DEFAULT 0, token TEXT, uploaded_at REAL,
+            updated_at REAL NOT NULL DEFAULT 0, last_error TEXT,
+            PRIMARY KEY(destination, name))''')
         conn.commit()
         return conn
 
@@ -102,6 +98,7 @@ class BackupService:
                 self.set_state(conn, 'last_error', None)
                 if scheduled:
                     self.set_state(conn, 'scheduled_slot', slot)
+                self.enqueue_remote(conn, [manifest])
                 conn.commit()
             except Exception as error:
                 conn.rollback()
@@ -147,10 +144,100 @@ class BackupService:
 
     def prune(self):
         scheduled = [item for item in self.entries() if item['kind'] == 'scheduled']
-        for item in scheduled[30:]:
-            path = self.safe_path(item['name'])
-            path.unlink(missing_ok=True)
-            path.with_suffix('.meta.json').unlink(missing_ok=True)
+        with closing(self.connect()) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            pending = {row[0] for row in conn.execute("SELECT name FROM remote_jobs WHERE status != 'uploaded'")}
+            uploaded = {row[0] for row in conn.execute("SELECT name FROM remote_jobs WHERE destination=? AND status='uploaded'", (self.remote.destination,))}
+            for item in scheduled[30:]:
+                # Never prune queued work, even if remote uploads are temporarily disabled.
+                if item['name'] in pending or (self.remote.enabled and item['name'] not in uploaded):
+                    continue
+                path = self.safe_path(item['name'])
+                path.unlink(missing_ok=True)
+                path.with_suffix('.meta.json').unlink(missing_ok=True)
+            conn.commit()
+
+    def enqueue_remote(self, conn, entries):
+        if self.remote.ready:
+            conn.executemany('INSERT OR IGNORE INTO remote_jobs(destination,name) VALUES (?,?)',
+                             [(self.remote.destination, item['name']) for item in entries])
+
+    def retry_remote(self):
+        if not self.remote.ready:
+            raise ValueError(self.remote.config_error or 'WebDAV 尚未启用')
+        with closing(self.connect()) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            self.enqueue_remote(conn, self.entries())
+            count = conn.execute("UPDATE remote_jobs SET next_try=0 WHERE destination=? AND status='pending'",
+                                 (self.remote.destination,)).rowcount
+            conn.commit()
+        return {'queued': count, 'message': '已排队，后台将在一分钟内开始；上传中的任务不会重复提交'}
+
+    def sync_remote(self, now=None):
+        """Claim at most one job. Network I/O never holds a SQLite transaction."""
+        if not self.remote.ready:
+            return {'skipped': True}
+        timestamp = (now or datetime.now(CHINA)).timestamp()
+        destination = self.remote.destination
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('BEGIN IMMEDIATE')
+            self.enqueue_remote(conn, self.entries())
+            conn.execute("UPDATE remote_jobs SET status='pending',token=NULL WHERE destination=? AND status='uploading' AND lease_until<=?",
+                         (destination, timestamp))
+            if conn.execute("SELECT 1 FROM remote_jobs WHERE destination=? AND status='uploading'", (destination,)).fetchone():
+                conn.commit()
+                return {'skipped': True}
+            job = conn.execute("SELECT * FROM remote_jobs WHERE destination=? AND status='pending' AND next_try<=? ORDER BY next_try,name LIMIT 1",
+                               (destination, timestamp)).fetchone()
+            if job is None:
+                conn.commit()
+                return {'skipped': True}
+            token = uuid4().hex
+            conn.execute("UPDATE remote_jobs SET status='uploading',token=?,lease_until=?,attempts=attempts+1,updated_at=? WHERE destination=? AND name=?",
+                         (token, timestamp + 900, timestamp, destination, job['name']))
+            conn.commit()
+        error = None
+        try:
+            raw = self.read_verified(job['name'])
+            self.verify(json.loads(raw))
+            self.remote.upload(self.safe_path(job['name']), hashlib.sha256(raw).hexdigest())
+        except WebDAVError as exc:
+            error = str(exc)
+        except Exception:
+            error = '本地备份校验或上传处理失败，请重新检查备份文件'
+        finished = timestamp if now else datetime.now(CHINA).timestamp()
+        with closing(self.connect()) as conn:
+            if error:
+                delay = min(3600, 60 * 2 ** min(job['attempts'], 6))
+                conn.execute("UPDATE remote_jobs SET status='pending',next_try=?,lease_until=0,token=NULL,last_error=?,updated_at=? WHERE destination=? AND name=? AND token=?",
+                             (finished + delay, error, finished, destination, job['name'], token))
+            else:
+                conn.execute("UPDATE remote_jobs SET status='uploaded',uploaded_at=?,lease_until=0,token=NULL,last_error=NULL,updated_at=? WHERE destination=? AND name=? AND token=?",
+                             (finished, finished, destination, job['name'], token))
+            conn.commit()
+        return {'name': job['name'], 'uploaded': error is None}
+
+    def remote_status(self):
+        with closing(self.connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            jobs = [dict(row) for row in conn.execute('SELECT * FROM remote_jobs WHERE destination=?', (self.remote.destination,))]
+        def date_text(value):
+            return datetime.fromtimestamp(value, CHINA).isoformat() if value else None
+        successful = [job for job in jobs if job['status'] == 'uploaded']
+        failed = [job for job in jobs if job['status'] != 'uploaded' and job['last_error']]
+        last = max(successful, key=lambda job: job['uploaded_at']) if successful else None
+        error = max(failed, key=lambda job: job['updated_at']) if failed else None
+        waiting = [job for job in jobs if job['status'] == 'pending']
+        return dict(enabled=self.remote.enabled, configured=self.remote.ready,
+                    configuration_error=self.remote.config_error,
+                    pending=len(waiting), uploading=sum(job['status'] == 'uploading' for job in jobs),
+                    failed=len(failed), uploaded=len(successful),
+                    next_retry=date_text(min((job['next_try'] for job in waiting), default=0)),
+                    last_success=dict(name=last['name'], time=date_text(last['uploaded_at'])) if last else None,
+                    last_error=dict(name=error['name'], time=date_text(error['updated_at']), message=error['last_error']) if error else None,
+                    files={job['name']: dict(status=job['status'], attempts=job['attempts'],
+                                            last_error=job['last_error'], uploaded_at=date_text(job['uploaded_at'])) for job in jobs})
 
     def safe_path(self, name):
         if not NAME.fullmatch(name):
@@ -203,7 +290,8 @@ class BackupService:
         due = now.replace(hour=3, minute=0, second=0, microsecond=0)
         upcoming = due if due > now else due + timedelta(days=1)
         return dict(schedule='每天北京时间 03:00，启动时补最近一期', retention=30,
-                    next_run=upcoming.isoformat(), webdav='reserved_disabled',
+                    next_run=upcoming.isoformat(), webdav='enabled' if self.remote.ready else 'configuration_error' if self.remote.enabled else 'disabled',
+                    remote=self.remote_status(),
                     last_success=state.get('last_success'), last_error=state.get('last_error'),
                     files=self.entries())
 
@@ -218,8 +306,20 @@ class BackupService:
     def start(self):
         self.thread = threading.Thread(target=self.run, name='wage-backup', daemon=True)
         self.thread.start()
+        self.remote_thread = threading.Thread(target=self.run_remote, name='wage-webdav', daemon=True)
+        self.remote_thread.start()
+
+    def run_remote(self):
+        while not self.stop_event.is_set():
+            try:
+                self.sync_remote()
+            except Exception:
+                logger.warning('Remote backup queue unavailable; retrying next minute')
+            self.stop_event.wait(60)
 
     def stop(self):
         self.stop_event.set()
         if self.thread:
             self.thread.join()
+        if self.remote_thread:
+            self.remote_thread.join()

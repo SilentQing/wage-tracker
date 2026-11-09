@@ -4,6 +4,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import date, timedelta
@@ -32,6 +33,10 @@ class LedgerTestCase(unittest.TestCase):
         cls.workspace.cleanup()
 
     def setUp(self):
+        environment = patch.dict(os.environ, {'WAGE_WEBDAV_ENABLED': 'false', 'WAGE_WEBDAV_URL': '',
+                                             'WAGE_WEBDAV_USERNAME': '', 'WAGE_WEBDAV_PASSWORD': ''})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.database = tempfile.TemporaryDirectory()
         self.module.DB_PATH = str(Path(self.database.name) / "wage.db")
         self.module.init_db()

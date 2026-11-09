@@ -8,7 +8,7 @@ function renderDailyAttendance() {
     document.getElementById('dailyAttendanceSummary').textContent = month === 'ALL'
         ? '请选择具体月份查看出勤日历。'
         : active ? `统计至 ${att.through_date}：日历 ${att.calendar_days} 天，请假 ${att.leave_hours.toFixed(2)} 小时，折算出勤 ${att.work_days.toFixed(2)} 天，正班 ${currentState.totals.regular_hours.toFixed(2)} 小时${currentState.locked ? '（已冻结）' : ''}`
-        : '本月保留原月度考勤。启用后以每日 8.5 小时重新核算正班，加班设置保留。';
+        : `本月按旧月度考勤核算：出勤 ${Number(att.work_days.toFixed(2))} 天，正班 ${currentState.totals.regular_hours.toFixed(2)} 小时。可在“考勤设置”中修改，或启用每日出勤。`;
 }
 
 async function enableDailyAttendance() {
@@ -176,7 +176,6 @@ function renderAll() {
     document.getElementById('attSubsidy').value = att.subsidy_per_ot;
     const summary = currentState.overtime_summary;
     const totals = currentState.totals;
-    document.getElementById('otSummaryText').textContent = `当前加班：${summary.count} 次（已记日期 ${summary.dated_count} 次，历史 ${summary.undated_count} 次）共 ${summary.hours.toFixed(1)} 小时 | 加班补贴 ¥${summary.subsidy.toFixed(2)}`;
     document.getElementById('statTotalPay').textContent = `¥${totals.total_pay.toFixed(2)}`;
     document.getElementById('statPaySub').textContent = `合格计件 ¥${totals.piece_wage.toFixed(2)} + 补贴 ¥${summary.subsidy.toFixed(2)} + 全勤 ¥${totals.attendance_bonus.toFixed(2)}`;
     document.getElementById('statDailyWage').textContent = `¥${totals.daily_wage.toFixed(2)}`;
@@ -230,10 +229,14 @@ function renderOvertimeCalendar() {
     if (!currentState.totals) return;
     renderDailyAttendance();
     renderPayroll();
+    renderPendingSubmissions();
     const month = document.getElementById('monthSelect').value;
     const allMonths = month === 'ALL';
     const locked = currentState.locked;
     const summary = currentState.overtime_summary;
+    document.getElementById('attendanceSettings').hidden = allMonths;
+    document.getElementById('legacyAttendanceSettings').hidden = allMonths || Boolean(currentState.attendance.daily_mode);
+    document.getElementById('legacyOvertimeSettings').hidden = allMonths || (Boolean(currentState.attendance.daily_mode) && summary.undated_count === 0);
     document.getElementById('calendarMonth').value = allMonths ? '' : month;
     document.getElementById('calendarMonth').disabled = overtimeSaving;
     document.getElementById('monthSelect').disabled = overtimeSaving;
@@ -423,7 +426,7 @@ function editRecord(id) {
     document.getElementById('recDate').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
-async function submitRecord() {
+function recordSubmissionPayload() {
     const payload = {
         record_date: document.getElementById('recDate').value,
         part_name: document.getElementById('recPart').value.trim(),
@@ -432,13 +435,18 @@ async function submitRecord() {
     };
     const price = document.getElementById('recPrice').value;
     if (price !== '') payload.unit_price = price;
+    return payload;
+}
+
+async function submitRecord() {
+    const payload = recordSubmissionPayload();
     if (!payload.record_date || !payload.part_name || !Number.isInteger(payload.quantity) || payload.quantity <= 0) {
         showStatus('请填写日期、种类和大于0的整数数量');
         return;
     }
     const id = editingRecordId;
-    await mutate(id === null ? '/api/records' : `/api/records/${id}`, id === null ? 'POST' : 'PUT',
-        payload, cancelRecordEdit, payload.record_date.slice(0, 7));
+    if (id === null) await submitDurable('records', payload);
+    else await mutate(`/api/records/${id}`, 'PUT', payload, cancelRecordEdit, payload.record_date.slice(0, 7));
 }
 
 async function deleteRecord(id) {
@@ -498,6 +506,10 @@ async function toggleMonthLock() {
 
 function downloadExport(kind) {
     const month = document.getElementById('monthSelect').value;
+    if (kind === 'statement' && (!month || month === 'ALL')) {
+        showStatus('请选择具体月份后导出完整月结单');
+        return;
+    }
     window.location.assign(`/api/export?month=${encodeURIComponent(month)}&kind=${kind}`);
 }
 

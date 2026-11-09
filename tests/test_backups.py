@@ -32,7 +32,7 @@ class BackupTests(LedgerTestCase):
         self.assertEqual(self.client.post(f'/api/backups/{name}/check').status_code, 200)
         self.assertEqual(self.client.post('/api/restore', json=payload).status_code, 200)
         self.assertEqual(self.data()['totals']['total_pay'], 20)
-        self.assertEqual(self.client.get('/api/backups').json()['webdav'], 'reserved_disabled')
+        self.assertEqual(self.client.get('/api/backups').json()['webdav'], 'disabled')
 
     def test_schedule_timezone_catchup_and_no_duplicate(self):
         service = self.service()
@@ -99,8 +99,9 @@ class BackupTests(LedgerTestCase):
             self.assertEqual(self.client.post('/api/restore/preview', json=backup).status_code, 413)
         self.assertEqual(self.data()['totals']['total_pay'], 20)
 
-    def test_remote_adapter_is_reserved_and_inactive(self):
-        with self.assertRaises(NotImplementedError):
+    def test_remote_adapter_is_disabled_by_default(self):
+        from webdav_client import WebDAVError
+        with self.assertRaises(WebDAVError):
             WebDAVAdapter().upload(Path('unused'), 'unused')
         with patch.dict('os.environ', {'WAGE_WEBDAV_PASSWORD': 'secret-test-password', 'WAGE_WEBDAV_URL': 'https://example.invalid/dav'}):
             entry = self.service().create()

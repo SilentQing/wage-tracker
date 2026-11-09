@@ -9,6 +9,7 @@ import tempfile
 import time
 import urllib.request
 from playwright.sync_api import sync_playwright, expect
+from browser_submissions import check_submissions
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -19,7 +20,7 @@ def main():
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
         url = f'http://127.0.0.1:{port}'
-        env = dict(os.environ, WAGE_DB_PATH=str(Path(temporary) / 'test.db'), WAGE_PASSWORD='')
+        env = dict(os.environ, WAGE_DB_PATH=str(Path(temporary) / 'test.db'), WAGE_PASSWORD='', WAGE_WEBDAV_ENABLED='false')
         server = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'app:app', '--host', '127.0.0.1', '--port', str(port)], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             for _ in range(100):
@@ -42,12 +43,30 @@ def main():
                 expect(page.locator('#saveStatus')).to_have_text('账本已加载')
                 page.locator('#monthSelect').select_option('2024-02')
                 expect(page.locator('#payrollSummary')).to_contain_text('25.00')
+                expect(page.locator('#remoteBackupStatus')).to_contain_text('异地备份未启用')
+                expect(page.locator('#remoteBackupRetry')).to_be_disabled()
                 expect(page.locator('#dailyAttendanceCalendar')).to_have_count(0)
                 expect(page.locator('#overtimeCalendar')).to_have_count(1)
+                expect(page.get_by_role('heading', name='⏱️ 上班天数与加班核算', exact=True)).to_have_count(0)
+                expect(page.locator('#attHoursPerOt')).not_to_be_visible()
+                page.locator('#attendanceSettings > summary').click()
+                expect(page.locator('#legacyAttendanceSettings')).to_be_visible()
+                expect(page.locator('#legacyOvertimeSettings')).to_be_visible()
+                page.locator('#legacyOvertimeSettings button').last.click()
+                expect(page.locator('#calendarSummary')).to_contain_text('未分配日期 1 次')
                 page.locator('#enableDailyAttendance').click()
                 expect(page.locator('#dailyAttendanceSummary')).to_contain_text('246.50 小时')
+                expect(page.locator('#legacyAttendanceSettings')).not_to_be_visible()
+                expect(page.locator('#legacyOvertimeSettings')).to_be_visible()
+                page.locator('#legacyOvertimeSettings button').first.click()
+                expect(page.locator('#legacyOvertimeSettings')).not_to_be_visible()
+                page.locator('#attHoursPerOt').fill('3')
+                page.locator('#attSubsidy').focus()
+                expect(page.locator('#saveStatus')).to_have_text('已保存')
+                page.locator('#attendanceSettings > summary').click()
                 day = page.locator('#overtimeCalendar [data-date="2024-02-10"]')
                 day.click()
+                expect(page.locator('#customOtHours')).to_have_value('3')
                 page.get_by_role('button', name='半天', exact=True).click()
                 page.locator('#leaveSave').click()
                 expect(page.locator('#leaveError')).to_have_text('请假已保存')
@@ -81,6 +100,10 @@ def main():
                 expect(page.locator('#monthLockButton')).to_have_text('解锁本月')
                 expect(page.locator('#bonusYes')).to_be_disabled()
                 expect(day).to_be_disabled()
+                page.locator('#attendanceSettings > summary').click()
+                expect(page.locator('#attHoursPerOt')).to_be_disabled()
+                expect(page.locator('#attSubsidy')).to_be_disabled()
+                page.locator('#attendanceSettings > summary').click()
                 for value in ['50', '70']:
                     page.locator('#paymentDate').fill('2024-03-10')
                     page.locator('#paymentAmount').fill(value)
@@ -112,9 +135,34 @@ def main():
                 assert len(current['tables']['records']) == 1
                 page.set_viewport_size({'width': 1280, 'height': 900})
                 expect(page.locator('#payrollHeading')).to_be_visible()
+                # Simulate remote states at the UI boundary; no NAS connection or credentials.
+                remote_mode = {'uploaded': False}
+                def remote_status(route):
+                    data = route.fetch().json()
+                    done = remote_mode['uploaded']
+                    name = data['files'][0]['name']
+                    data['remote'] = dict(enabled=True, configured=True, pending=0 if done else 1,
+                        uploading=0, failed=0 if done else 1, next_retry=None,
+                        last_success=dict(name=name, time=data['files'][0]['created_at']) if done else None,
+                        last_error=None if done else dict(message='WebDAV 认证失败或目录读写权限不足'),
+                        files={name: dict(status='uploaded' if done else 'pending', last_error=None)})
+                    route.fulfill(json=data)
+                def remote_retry(route):
+                    remote_mode['uploaded'] = True
+                    route.fulfill(json={'queued': 1})
+                page.route('**/api/backups', remote_status)
+                page.route('**/api/backups/remote/retry', remote_retry)
+                page.locator('#backupRefresh').click()
+                expect(page.locator('#remoteBackupStatus')).to_contain_text('待重试 1 份')
+                expect(page.locator('#remoteBackupRetry')).to_be_enabled()
+                page.locator('#remoteBackupRetry').click()
+                expect(page.locator('#backupActionStatus')).to_contain_text('重新排队')
+                expect(page.locator('#remoteBackupStatus')).to_contain_text('待重试 0 份')
+                expect(page.locator('#backupFiles')).to_contain_text('两文件上传及下载校验通过')
+                check_submissions(page, url)
                 assert not errors, errors
                 browser.close()
-            print('PASS: unified calendar, leave and overtime edits, lock, mobile and desktop, payroll, backup and restore; no page errors')
+            print('PASS: calendar, payroll, backup/restore, simulated WebDAV UI, durable submissions with lost requests/responses and reload; no page errors')
         finally:
             server.terminate()
             server.wait(timeout=10)

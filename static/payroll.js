@@ -1,5 +1,4 @@
 let rejectionRecordId = null;
-let paymentAttempt = null;
 
 function renderPayroll() {
     const month = document.getElementById('monthSelect').value;
@@ -85,25 +84,16 @@ async function submitRejection(event) {
     } finally { button.disabled = false; }
 }
 
-async function submitPayment(event) {
-    event.preventDefault();
-    const payload = {
+function paymentSubmissionPayload() {
+    return {
         month: document.getElementById('monthSelect').value,
         paid_date: document.getElementById('paymentDate').value,
         amount: document.getElementById('paymentAmount').value,
         note: document.getElementById('paymentNote').value
     };
-    const signature = JSON.stringify(payload);
-    if (!paymentAttempt || paymentAttempt.signature !== signature) {
-        if (paymentAttempt && !confirm('上一笔保存结果尚未确认。请先核对到账列表；确认要改为登记这笔新内容？')) return;
-        const bytes = crypto.getRandomValues(new Uint8Array(16));
-        paymentAttempt = {signature, id: Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')};
-    }
-    const ok = await mutate('/api/payments', 'POST', {...payload, id: paymentAttempt.id}, () => {
-        paymentAttempt = null;
-        document.getElementById('paymentAmount').value = '';
-        document.getElementById('paymentNote').value = '';
-        document.getElementById('paymentError').textContent = '';
-    });
-    if (!ok) document.getElementById('paymentError').textContent = document.getElementById('saveStatus').textContent;
+}
+
+async function submitPayment(event) {
+    event.preventDefault();
+    await submitDurable('payments', paymentSubmissionPayload());
 }
